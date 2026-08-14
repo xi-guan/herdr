@@ -1539,6 +1539,16 @@ pub struct AppState {
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     pub sidebar_position: crate::config::SidebarPositionConfig,
+    /// The last figures Claude's `/usage` screen gave up, if it ever has.
+    pub claude_usage: Option<crate::usage::ClaudeUsage>,
+    pub next_claude_usage_poll: Option<std::time::Instant>,
+    /// Consecutive refusals from the usage endpoint, which sets how long to wait.
+    pub claude_usage_refusals: u32,
+    /// Tokens over the last seven days, as Claude's own daily tally reports them. A
+    /// separate reading from the windows above: that one is an endpoint that
+    /// rate-limits, this one is a file on disk that costs nothing to look at.
+    pub claude_seven_day_tokens: Option<u64>,
+    pub next_claude_tokens_poll: Option<std::time::Instant>,
     /// When a pane's completion was last acknowledged by looking at it. The mark that
     /// said "finished, you missed it" would otherwise vanish in the same frame as the
     /// click that answered it, and the two would never be seen as the same thing.
@@ -1973,6 +1983,11 @@ impl AppState {
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             sidebar_position: crate::config::SidebarPositionConfig::default(),
+            claude_usage: None,
+            next_claude_usage_poll: None,
+            claude_usage_refusals: 0,
+            claude_seven_day_tokens: None,
+            next_claude_tokens_poll: None,
             acknowledged_at: std::collections::HashMap::new(),
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,

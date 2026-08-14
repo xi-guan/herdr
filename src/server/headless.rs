@@ -4651,6 +4651,24 @@ impl HeadlessServer {
 
         if self
             .app
+            .state
+            .next_claude_usage_poll
+            .is_none_or(|deadline| now >= deadline)
+        {
+            self.app.run_claude_usage_poll(now);
+        }
+
+        if self
+            .app
+            .state
+            .next_claude_tokens_poll
+            .is_none_or(|deadline| now >= deadline)
+        {
+            self.app.run_claude_tokens_poll(now);
+        }
+
+        if self
+            .app
             .config_diagnostic_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -7384,6 +7402,20 @@ next_tab = ""
 
         assert!(!server.handle_scheduled_tasks_headless(now, false));
         assert_eq!(server.app.next_agent_manifest_update_check, None);
+    }
+
+    /// The server runs its own scheduled tasks rather than `App`'s, so a poll added to
+    /// one and not the other never fires where it matters: the token figure was added
+    /// to `App` alone and no server ever read it.
+    #[test]
+    fn headless_scheduled_tasks_schedule_both_claude_polls() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert!(server.app.state.next_claude_usage_poll.is_some());
+        assert!(server.app.state.next_claude_tokens_poll.is_some());
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
+
+use crate::app::state::Palette;
 
 use super::text::display_width_u16;
 use super::widgets::panel_contrast_fg;
@@ -527,6 +530,8 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
+    render_claude_usage(app, frame, area);
+
     if let Some(status_area) = tab_bar_status_area(app, area) {
         let segments = visible_status_segments(app);
         let separator_width = display_width_u16(&app.tab_bar_right_separator);
@@ -558,6 +563,174 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Shortens a window's name to something a one-row bar can carry. Anything the
+/// endpoint names after a model keeps that name, since that is already short.
+fn usage_window_label(label: &str) -> String {
+    match label {
+        "session" => "5h".to_string(),
+        "weekly_all" => "week".to_string(),
+        // a model's own capitalisation is the endpoint's; nothing else on this bar
+        // is capitalised, and one capital in a row of figures reads as emphasis
+        other => other.to_lowercase(),
+    }
+}
+
+/// Whose figures these are. Not Anthropic's mark: no font ships it, and a terminal
+/// cell holds one glyph. This is Octicons' filled sparkle, the shape editors have
+/// settled on for "a model did this" — solid enough to carry the brand's colour,
+/// where the plain asterisks are too thin to read as anything.
+///
+/// A Nerd Font private-use codepoint, so it needs one installed. Everything here
+/// already assumes that; a box would be the sign it is missing.
+const USAGE_MARK: &str = "";
+
+/// How long the group has left. A clock rather than the circular arrow that usually
+/// means "reset": the number before it is time remaining, and a refresh arrow reads as
+/// something you could press. Font Awesome rather than the Octicons the mark above
+/// comes from — Octicons draws a size larger than the figures beside it here, and one
+/// oversized glyph in a row of numbers reads as emphasis.
+const RESET_MARK: &str = "";
+
+/// Windows that run down together, each group carrying the one countdown they share.
+///
+/// Grouped by the countdown as written, not by the timestamp behind it: the endpoint
+/// stamps the weekly windows microseconds apart, so comparing the text it sends puts
+/// two windows that reset at the same moment in separate groups and prints `reset 72h`
+/// twice. A window with no reset to report never joins a group — an absent time is not
+/// a time two windows can have in common.
+fn usage_groups(
+    windows: &[crate::usage::UsageWindow],
+    now: std::time::SystemTime,
+) -> Vec<(Vec<&crate::usage::UsageWindow>, Option<String>)> {
+    let mut groups: Vec<(Vec<&crate::usage::UsageWindow>, Option<String>)> = Vec::new();
+    for window in windows {
+        let reset = window
+            .resets
+            .as_deref()
+            .and_then(|stamp| crate::usage::resets_in(stamp, now))
+            .map(crate::usage::reset_label);
+        match groups
+            .last_mut()
+            .filter(|(_, last)| reset.is_some() && *last == reset)
+        {
+            Some((group, _)) => group.push(window),
+            None => groups.push((vec![window], reset)),
+        }
+    }
+    groups
+}
+
+/// A token count at the width a one-row bar can spare. Three figures is as much as a
+/// number this size says: nobody acts on the difference between 5.81B and 5.82B, and
+/// the digits it would take to tell them apart cost a tab its place.
+fn compact_tokens(tokens: u64) -> String {
+    match tokens {
+        ..1_000 => tokens.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", tokens as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1}M", tokens as f64 / 1e6),
+        _ => format!("{:.1}B", tokens as f64 / 1e9),
+    }
+}
+
+/// Quiet until the window is close to spent. A figure that is loud at 3% teaches you
+/// to stop reading it, and then it is not there when it matters.
+fn usage_percent_color(percent: u8, p: &Palette) -> Color {
+    match percent {
+        90.. => p.red,
+        75..=89 => p.peach,
+        _ => p.overlay0,
+    }
+}
+
+/// Claude's limit windows, in the end of the bar the tabs never reach. They are only
+/// otherwise visible by leaving what you are doing and asking Claude itself.
+fn render_claude_usage(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(usage) = app.claude_usage.as_ref().filter(|u| !u.windows.is_empty()) else {
+        return;
+    };
+    let p = &app.palette;
+
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        format!("{USAGE_MARK} "),
+        // the brand's own colour is what makes the mark read as whose figures these
+        // are; a glyph this thin cannot do it on weight
+        Style::default().fg(p.peach),
+    )];
+    let now = std::time::SystemTime::now();
+    // windows that reset together are one thing running down, so the countdown is
+    // written once for the group rather than repeated after every figure
+    for (group_idx, (group, reset)) in usage_groups(&usage.windows, now).iter().enumerate() {
+        if group_idx > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(p.surface1)));
+        }
+        for (idx, window) in group.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled(", ", Style::default().fg(p.overlay0)));
+            }
+            spans.push(Span::styled(
+                format!("{} ", usage_window_label(&window.label)),
+                Style::default().fg(p.overlay0),
+            ));
+            spans.push(Span::styled(
+                format!("{}%", window.percent),
+                Style::default().fg(usage_percent_color(window.percent, p)),
+            ));
+        }
+        // the percent alone does not say whether it is worth waiting out. It joins the
+        // group on the same comma the windows use, so the countdown reads as one more
+        // thing about them rather than as something that ran into the last figure
+        if let Some(label) = reset {
+            spans.push(Span::styled(
+                format!(", {label} {RESET_MARK}"),
+                Style::default().fg(p.overlay0),
+            ));
+        }
+    }
+
+    // a percentage says how much of a limit is gone, never how much went through. Its
+    // own group rather than beside `week`: this is a rolling seven days, not the
+    // endpoint's window, and sharing a label would make it the wrong number
+    if let Some(tokens) = app.claude_seven_day_tokens {
+        spans.push(Span::styled(" │ ", Style::default().fg(p.surface1)));
+        spans.push(Span::styled(
+            format!("7d {}", compact_tokens(tokens)),
+            Style::default().fg(p.overlay0),
+        ));
+    }
+
+    let width = spans
+        .iter()
+        .map(|span| display_width_u16(span.content.as_ref()))
+        .sum::<u16>();
+    // the tabs own their end of the bar; the figures only take what is left over,
+    // and say nothing at all rather than push a tab off the edge
+    let taken = app
+        .view
+        .tab_hit_areas
+        .iter()
+        .chain(std::iter::once(&app.view.new_tab_hit_area))
+        .filter(|rect| rect.width > 0)
+        .map(|rect| rect.x.saturating_add(rect.width))
+        .max()
+        .unwrap_or(area.x);
+    let right = if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
+        app.view.tab_scroll_right_hit_area.x
+    } else {
+        area.x.saturating_add(area.width)
+    };
+    let Some(x) = right.checked_sub(width.saturating_add(1)) else {
+        return;
+    };
+    if x <= taken {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(x, area.y, width, 1),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +744,161 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn usage(windows: &[(&str, u8)]) -> crate::usage::ClaudeUsage {
+        crate::usage::ClaudeUsage {
+            windows: windows
+                .iter()
+                .map(|(label, percent)| crate::usage::UsageWindow {
+                    label: (*label).to_string(),
+                    percent: *percent,
+                    resets: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn window(label: &str, percent: u8, resets: Option<&str>) -> crate::usage::UsageWindow {
+        crate::usage::UsageWindow {
+            label: label.to_string(),
+            percent,
+            resets: resets.map(str::to_string),
+        }
+    }
+
+    fn render_bar(app: &AppState, width: u16) -> String {
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(app, frame, app.view.tab_bar_rect))
+            .unwrap();
+        buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0)
+    }
+
+    fn app_with_usage(width: u16, usage: crate::usage::ClaudeUsage) -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.claude_usage = Some(usage);
+        app.view.tab_bar_rect = Rect::new(0, 0, width, 1);
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, false);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app
+    }
+
+    /// The end of the bar is dead space no tab ever reaches, and these figures are
+    /// otherwise only visible by leaving what you are doing to ask Claude for them.
+    #[test]
+    fn the_bar_carries_claude_usage_in_the_end_the_tabs_never_reach() {
+        let app = app_with_usage(60, usage(&[("session", 3), ("weekly_all", 6)]));
+
+        let row = render_bar(&app, 60);
+
+        assert!(row.ends_with(" 5h 3% │ week 6%"), "bar row: {row:?}");
+    }
+
+    /// A percentage says how much of a limit is gone and never how much went through,
+    /// and the endpoint has no count to give. This one is tallied from Claude's own
+    /// transcripts, so it stands apart from the windows beside it.
+    #[test]
+    fn the_bar_carries_the_weeks_tokens_beside_the_limits() {
+        let mut app = app_with_usage(70, usage(&[("session", 3), ("weekly_all", 6)]));
+        app.claude_seven_day_tokens = Some(31_000_000);
+
+        let row = render_bar(&app, 70);
+
+        assert!(row.ends_with("│ 7d 31.0M"), "bar row: {row:?}");
+    }
+
+    /// The countdown belongs to the group, so it joins on the same comma the windows
+    /// in it use. Without one it ran straight into the last percentage.
+    #[test]
+    fn a_countdown_joins_its_group_on_a_comma() {
+        // the render path reads the wall clock, and a window that has already reset
+        // reports no countdown to join, so the stamps have to outlive the test itself
+        let mut app = app_with_usage(
+            70,
+            crate::usage::ClaudeUsage {
+                windows: vec![
+                    window("weekly_all", 24, Some("2126-08-06T12:00:00Z")),
+                    window("Fable", 7, Some("2126-08-06T12:00:00.000603Z")),
+                ],
+            },
+        );
+        app.claude_seven_day_tokens = None;
+
+        let row = render_bar(&app, 70);
+
+        assert!(row.contains("week 24%, fable 7%, "), "bar row: {row:?}");
+    }
+
+    /// Nobody acts on the difference between 5.81B and 5.82B, and the digits it takes
+    /// to tell them apart cost a tab its place on the bar.
+    #[test]
+    fn a_token_count_keeps_three_figures_and_no_more() {
+        assert_eq!(compact_tokens(0), "0");
+        assert_eq!(compact_tokens(999), "999");
+        assert_eq!(compact_tokens(12_300), "12.3k");
+        assert_eq!(compact_tokens(83_167_217), "83.2M");
+        assert_eq!(compact_tokens(5_809_127_363), "5.8B");
+    }
+
+    /// Two windows that reset at the same moment are one thing running down, so the
+    /// countdown belongs to the pair. The endpoint stamps them microseconds apart, and
+    /// grouping on the text it sends printed `reset` after each of them.
+    #[test]
+    fn windows_that_reset_together_share_one_countdown() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_785_585_600);
+        let windows = vec![
+            window("session", 4, Some("2026-08-01T15:00:00Z")),
+            window("weekly_all", 10, Some("2026-08-04T12:00:00.603277+00:00")),
+            window("Fable", 2, Some("2026-08-04T12:00:00.603504+00:00")),
+        ];
+
+        let groups = usage_groups(&windows, now);
+
+        assert_eq!(groups.len(), 2, "the weeklies belong together");
+        assert_eq!(groups[0].1.as_deref(), Some("3h"));
+        assert_eq!(groups[1].0.len(), 2);
+        assert_eq!(groups[1].1.as_deref(), Some("72h"));
+        // the endpoint capitalises a model name; nothing else on the bar is
+        assert_eq!(usage_window_label(&groups[1].0[1].label), "fable");
+    }
+
+    /// A window with no reset to report cannot share one, however it is placed.
+    #[test]
+    fn a_window_without_a_reset_stands_on_its_own() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_785_585_600);
+        let windows = vec![window("session", 4, None), window("weekly_all", 10, None)];
+
+        let groups = usage_groups(&windows, now);
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|(_, reset)| reset.is_none()));
+    }
+
+    /// A figure that shouts at 3% teaches you to stop reading it, and then it is not
+    /// there at 95%.
+    #[test]
+    fn a_usage_window_only_takes_a_colour_once_it_is_nearly_spent() {
+        let p = crate::app::state::Palette::from_name("catppuccin").expect("theme resolves");
+
+        assert_eq!(usage_percent_color(3, &p), p.overlay0);
+        assert_eq!(usage_percent_color(74, &p), p.overlay0);
+        assert_eq!(usage_percent_color(80, &p), p.peach);
+        assert_eq!(usage_percent_color(95, &p), p.red);
+    }
+
+    /// The tabs own the bar. A narrow one has no room to spare, and dropping the
+    /// figures is the only answer that does not push a tab off the edge.
+    #[test]
+    fn usage_gives_way_rather_than_crowding_the_tabs() {
+        let app = app_with_usage(14, usage(&[("session", 3), ("weekly_all", 6)]));
+
+        let row = render_bar(&app, 14);
+
+        assert!(!row.contains('%'), "bar row: {row:?}");
     }
 
     #[test]

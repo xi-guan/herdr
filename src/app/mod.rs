@@ -531,6 +531,11 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            claude_usage: None,
+            next_claude_usage_poll: None,
+            claude_usage_refusals: 0,
+            claude_seven_day_tokens: None,
+            next_claude_tokens_poll: None,
             acknowledged_at: std::collections::HashMap::new(),
             agent_spinner_frame: 0,
             next_agent_spinner_tick: None,

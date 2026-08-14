@@ -301,6 +301,22 @@ impl App {
         changed |= self.state.expire_acknowledged_holds(now);
 
         if self
+            .state
+            .next_claude_usage_poll
+            .is_none_or(|deadline| now >= deadline)
+        {
+            self.run_claude_usage_poll(now);
+        }
+
+        if self
+            .state
+            .next_claude_tokens_poll
+            .is_none_or(|deadline| now >= deadline)
+        {
+            self.run_claude_tokens_poll(now);
+        }
+
+        if self
             .config_diagnostic_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -569,6 +585,30 @@ impl App {
         std::thread::spawn(move || crate::detect::manifest_update::auto_update(manifest_update_tx));
     }
 
+    /// Refreshes Claude's usage figures. The first read is due shortly after start so
+    /// the bar is not blank while nothing has happened yet.
+    pub(crate) fn run_claude_usage_poll(&mut self, now: Instant) {
+        self.state.next_claude_usage_poll = Some(now + crate::usage::POLL_INTERVAL);
+        // only the first read of a run may come off disk; after that the whole point
+        // is to find out whether the figures moved
+        let stored = self.state.claude_usage.is_none();
+        let usage_tx = self.event_tx.clone();
+        std::thread::spawn(move || crate::usage::poll(usage_tx, stored));
+    }
+
+    /// Re-reads Claude's daily token tally. Off the event loop like the endpoint read
+    /// above: the file is small, but a state that only changes through events is one
+    /// that can be tested without a filesystem under it.
+    pub(crate) fn run_claude_tokens_poll(&mut self, now: Instant) {
+        self.state.next_claude_tokens_poll = Some(now + crate::usage::TOKEN_POLL_INTERVAL);
+        let tokens_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let tokens = crate::usage::seven_day_tokens();
+            tracing::debug!(?tokens, "read claude token tally");
+            let _ = tokens_tx.blocking_send(crate::events::AppEvent::ClaudeTokensRead { tokens });
+        });
+    }
+
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
         self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
@@ -601,6 +641,8 @@ impl App {
             include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            self.state.next_claude_usage_poll,
+            self.state.next_claude_tokens_poll,
             // the held colour has to be repainted the moment it runs out, or it stays
             // until something else happens to redraw
             self.state.next_acknowledged_hold_expiry(),

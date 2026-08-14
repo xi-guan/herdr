@@ -2,7 +2,7 @@ mod actions;
 mod claude_settings;
 mod command;
 mod config_edit;
-mod env;
+pub(crate) mod env;
 mod file_ops;
 mod opencode_config;
 mod registry;

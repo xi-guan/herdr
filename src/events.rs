@@ -125,6 +125,20 @@ pub enum AppEvent {
         version: String,
         install_command: String,
     },
+    /// Claude's limit windows, as the endpoint reported them.
+    ClaudeUsageRead {
+        usage: crate::usage::ClaudeUsage,
+        /// False when it came off disk, which is worth showing but is no reason to
+        /// forget that the endpoint just refused.
+        live: bool,
+    },
+    /// The endpoint refused. It rate-limits in a window of a few minutes, so this is
+    /// worth another try well before the next scheduled read.
+    ClaudeUsageUnavailable,
+    /// Tokens over the last seven days, from the daily tally Claude keeps for its own
+    /// stats screen. `None` once the file is unreadable, which blanks the figure
+    /// rather than leaving a number nothing stands behind.
+    ClaudeTokensRead { tokens: Option<u64> },
     /// Remote agent detection manifest update check finished.
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,

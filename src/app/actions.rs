@@ -42,6 +42,21 @@ impl TreeScrollTarget {
     }
 }
 
+/// How long to wait before asking for Claude's usage again after a refusal. The
+/// endpoint rate-limits in a window of a few minutes, so waiting out the full read
+/// interval leaves the figures blank far longer than the refusal lasts — while
+/// retrying at a fixed short delay would keep the window tripped.
+fn claude_usage_retry_delay(refusals: u32) -> std::time::Duration {
+    const FIRST: u64 = 60;
+    // never longer than simply waiting for the next scheduled read
+    let cap = crate::usage::POLL_INTERVAL.as_secs();
+
+    // clamped far below the shift that would overflow: the ladder reaches the cap
+    // after two doublings and stays there
+    let doublings = refusals.saturating_sub(1).min(8);
+    std::time::Duration::from_secs((FIRST << doublings).min(cap))
+}
+
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
@@ -2811,6 +2826,25 @@ impl AppState {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
+            AppEvent::ClaudeUsageRead { usage, live } => {
+                self.claude_usage = Some(usage.clone());
+                if live {
+                    self.claude_usage_refusals = 0;
+                }
+                Vec::new()
+            }
+            AppEvent::ClaudeTokensRead { tokens } => {
+                self.claude_seven_day_tokens = tokens;
+                Vec::new()
+            }
+            AppEvent::ClaudeUsageUnavailable => {
+                self.claude_usage_refusals = self.claude_usage_refusals.saturating_add(1);
+                self.next_claude_usage_poll = Some(
+                    std::time::Instant::now()
+                        + claude_usage_retry_delay(self.claude_usage_refusals),
+                );
+                Vec::new()
+            }
             AppEvent::UpdateReady {
                 version,
                 install_command,
@@ -3513,6 +3547,21 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    /// The refusal window is a few minutes, so the first retry comes long before the
+    /// next scheduled read — but retrying at that delay forever would keep the window
+    /// tripped, so it backs off to the ordinary interval and stays there.
+    #[test]
+    fn a_refused_read_is_retried_sooner_than_the_next_scheduled_one() {
+        let delay = |refusals| claude_usage_retry_delay(refusals).as_secs();
+
+        assert_eq!(delay(1), 60);
+        assert_eq!(delay(2), 120);
+        assert_eq!(delay(4), 300);
+        // never longer than simply waiting for the next read, and never overflowing
+        assert_eq!(delay(9), 300);
+        assert_eq!(delay(u32::MAX), 300);
+    }
+
     use super::*;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
