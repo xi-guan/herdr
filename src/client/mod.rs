@@ -55,6 +55,7 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 // Client state
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct ClientLoopConfig {
     sound_config: crate::config::SoundConfig,
     mouse_scroll_lines: usize,
@@ -1307,20 +1308,48 @@ fn run_client_with_mode(
         warn!(%err, "failed to install termination handler; terminal restore relies on TerminalGuard::Drop and the panic hook");
     }
 
-    let result = rt.block_on(async {
-        run_client_loop(
-            stream,
+    // A live handoff replaces the server behind the same socket, so a dropped
+    // connection is not proof the session is gone. Retry briefly before giving up;
+    // a server that really died just makes this cost the timeout once.
+    let mut stream = stream;
+    let mut negotiated_encoding = negotiated_encoding;
+    let mut attach_escape = attach_escape;
+    let result = loop {
+        let outcome = rt.block_on(async {
+            run_client_loop(
+                stream,
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+                should_quit.clone(),
+                loop_config.clone(),
+                negotiated_encoding,
+                attach_escape.take(),
+            )
+            .await
+        });
+        if !outcome.as_ref().err().is_some_and(server_may_return)
+            || direct_attach
+            || should_quit.load(Ordering::Acquire)
+        {
+            break outcome;
+        }
+        let Some((reconnected, encoding)) = reconnect_to_replacement_server(
+            &socket_path,
             cols,
             rows,
             cell_width_px,
             cell_height_px,
-            should_quit,
-            loop_config,
-            negotiated_encoding,
-            attach_escape,
-        )
-        .await
-    });
+            exact_cell_size,
+            requested_encoding,
+            direct_attach_requested,
+        ) else {
+            break outcome;
+        };
+        stream = reconnected;
+        negotiated_encoding = encoding;
+    };
 
     // Restore the terminal before printing any final status message.
     drop(terminal_guard);
@@ -1345,6 +1374,94 @@ fn run_client_with_mode(
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("client");
     Ok(())
+}
+
+/// Whether the socket is expected to have a server on it again shortly. A handoff
+/// announces itself, so that reason is worth waiting on; every other shutdown —
+/// `herdr server stop`, a detach, a takeover — means nobody is coming back.
+fn server_may_return(err: &ClientError) -> bool {
+    match err {
+        ClientError::ConnectionLost(_) => true,
+        ClientError::ServerShutdown { reason } => {
+            reason.as_deref() == Some(crate::protocol::HANDOFF_SHUTDOWN_REASON)
+        }
+        _ => false,
+    }
+}
+
+/// How long a client keeps looking for a server on the same socket after losing
+/// its connection. Long enough for a live handoff to finish, short enough that a
+/// server that really died still reports quickly.
+const RECONNECT_WINDOW: Duration = Duration::from_secs(5);
+const RECONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Reconnects to whatever server now owns `socket_path`, or `None` once the window
+/// closes. The terminal stays in raw mode across this, so a handoff only shows up
+/// as a redraw rather than as the client exiting and having to be relaunched.
+#[allow(clippy::too_many_arguments)]
+fn reconnect_to_replacement_server(
+    socket_path: &std::path::Path,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    exact_cell_size: bool,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+) -> Option<(LocalStream, RenderEncoding)> {
+    reconnect_within(
+        RECONNECT_WINDOW,
+        socket_path,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        exact_cell_size,
+        requested_encoding,
+        direct_attach_requested,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconnect_within(
+    window: Duration,
+    socket_path: &std::path::Path,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    exact_cell_size: bool,
+    requested_encoding: RenderEncoding,
+    direct_attach_requested: bool,
+) -> Option<(LocalStream, RenderEncoding)> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        if let Ok(mut stream) = crate::ipc::connect_local_stream(socket_path) {
+            match do_handshake(
+                &mut stream,
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+                exact_cell_size,
+                requested_encoding,
+                direct_attach_requested,
+            ) {
+                Ok(encoding) => {
+                    info!("reconnected to the server that took over the socket");
+                    return Some((stream, encoding));
+                }
+                // the socket outlives the server that made it, so mid-handoff a
+                // connect lands on one that is already leaving; keep trying until
+                // the window closes rather than reading one refusal as the answer
+                Err(err) => warn!(err = %err, "reconnect handshake refused, retrying"),
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(RECONNECT_POLL_INTERVAL.min(window));
+    }
 }
 
 /// The main client event loop.
@@ -2610,6 +2727,58 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+
+    /// A handoff is the one shutdown that promises a successor. Every other reason —
+    /// and a plain quit — has to keep exiting, or a `herdr server stop` would leave
+    /// the client staring at a socket nobody is coming back to.
+    #[test]
+    fn only_a_handoff_shutdown_is_worth_waiting_out() {
+        assert!(server_may_return(&ClientError::ConnectionLost(
+            io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe")
+        )));
+        assert!(server_may_return(&ClientError::ServerShutdown {
+            reason: Some(crate::protocol::HANDOFF_SHUTDOWN_REASON.to_string()),
+        }));
+
+        for reason in [
+            Some("server is shutting down".to_string()),
+            Some("detached".to_string()),
+            None,
+        ] {
+            assert!(!server_may_return(&ClientError::ServerShutdown { reason }));
+        }
+    }
+
+    /// A server that really died leaves nothing on the socket, so the retry has to
+    /// end on its own; without the deadline the client would hang instead of
+    /// reporting the lost connection.
+    #[test]
+    fn reconnect_gives_up_once_its_window_closes() {
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-reconnect-test-{}-{}.sock",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let window = Duration::from_millis(120);
+
+        let started = std::time::Instant::now();
+        let outcome = reconnect_within(
+            window,
+            &socket,
+            80,
+            24,
+            0,
+            0,
+            false,
+            RenderEncoding::SemanticFrame,
+            false,
+        );
+
+        assert!(outcome.is_none());
+        assert!(started.elapsed() >= window);
+        assert!(started.elapsed() < window * 20);
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

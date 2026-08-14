@@ -641,6 +641,7 @@ impl App {
             include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            self.state.next_agent_spinner_tick,
             self.state.next_claude_usage_poll,
             self.state.next_claude_tokens_poll,
             // the held colour has to be repainted the moment it runs out, or it stays
@@ -733,6 +734,25 @@ mod tests {
             is_focused: true,
         });
         (app, pane_id)
+    }
+
+    /// The loop only wakes for deadlines it is told about. Without this one the
+    /// spinner advances whenever something else happens to wake the loop, which is
+    /// the 250ms accept poll — four irregular frames a second instead of twenty-five.
+    #[test]
+    fn the_loop_wakes_for_the_spinner_while_an_agent_is_working() {
+        let (mut app, _) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let now = Instant::now();
+
+        assert!(app.state.next_agent_spinner_tick.is_none());
+        for terminal in app.state.terminals.values_mut() {
+            terminal.state = crate::detect::AgentState::Working;
+        }
+        assert!(app.state.tick_agent_spinner(now));
+
+        let deadline = app.next_headless_loop_deadline_with_git_refresh(now, false, false);
+        assert_eq!(deadline, app.state.next_agent_spinner_tick);
     }
 
     #[test]

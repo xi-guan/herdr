@@ -248,6 +248,20 @@ install: build
     fi
     install -m 755 target/release/herdr "$target"
     target/release/herdr --version
+    echo "note: the running server keeps the old binary until: just restart"
+
+# Swap the running server onto the installed binary, keeping every agent alive
+restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # the fds move to the new server before the old one exits, so a failure here
+    # leaves the old server untouched rather than half-migrated
+    if herdr server live-handoff; then
+        exit 0
+    fi
+    echo "live handoff refused — the new binary could not take over." >&2
+    echo "run 'herdr server stop' to restart the hard way; agents resume from their session but lose in-flight work." >&2
+    exit 1
 
 # Remove the locally installed binary and build artifacts
 uninstall:

@@ -35,6 +35,12 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 // ---------------------------------------------------------------------------
 
 /// Render payload encoding negotiated during client handshake.
+/// Reason a server sends before handing its panes to a replacement. It is the only
+/// signal a client gets that the socket will come back, so both sides share it
+/// rather than each spelling the sentence out.
+pub const HANDOFF_SHUTDOWN_REASON: &str =
+    "live update in progress; reconnect after handoff completes";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderEncoding {
     /// Send full semantic FrameData values. This is the local/default mode.

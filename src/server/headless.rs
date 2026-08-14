@@ -2756,9 +2756,7 @@ impl HeadlessServer {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
-                    reason: Some(
-                        "live update in progress; reconnect after handoff completes".to_owned(),
-                    ),
+                    reason: Some(crate::protocol::HANDOFF_SHUTDOWN_REASON.to_owned()),
                 },
             );
             if let Some(client) = self.clients.get_mut(&client_id) {
