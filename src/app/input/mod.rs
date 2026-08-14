@@ -860,6 +860,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.active,
         state.selected,
         state.sidebar_snapshot_state(),
+        state.hidden_spaces_snapshot(),
     )
 }
 

@@ -208,6 +208,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             sidebar_agents_view: false,
+            hidden_spaces: Vec::new(),
         }
     }
 

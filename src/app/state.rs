@@ -675,6 +675,31 @@ impl AppState {
             agents_view: self.sidebar_view == SidebarView::Agents,
         }
     }
+
+    /// Hidden spaces in the shape the session file stores them.
+    pub(crate) fn hidden_spaces_snapshot(&self) -> Vec<crate::persist::HiddenSpaceSnapshot> {
+        self.hidden_spaces
+            .iter()
+            .map(|hidden| crate::persist::HiddenSpaceSnapshot {
+                id: hidden.id.clone(),
+                label: hidden.label.clone(),
+                cwd: hidden.cwd.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn hidden_spaces_from_snapshot(
+        snapshot: &[crate::persist::HiddenSpaceSnapshot],
+    ) -> Vec<HiddenSpace> {
+        snapshot
+            .iter()
+            .map(|hidden| HiddenSpace {
+                id: hidden.id.clone(),
+                label: hidden.label.clone(),
+                cwd: hidden.cwd.clone(),
+            })
+            .collect()
+    }
 }
 
 /// Hit area for an agent row nested under a space row in the spaces view.
@@ -992,6 +1017,10 @@ pub(crate) enum NavigatorStateFilter {
     Working,
     Idle,
     Done,
+    /// Blocked or finished-while-you-were-away: the two tiers the sidebar paints in
+    /// colour. One filter rather than two because they are one question — who is
+    /// waiting on me — and answering it in two passes hides half the answer.
+    Waiting,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1049,11 +1078,35 @@ pub enum AgentPanelSort {
     Priority,
 }
 
+/// Which sidebar view is showing. They share the full sidebar height instead of
+/// being stacked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SidebarView {
     #[default]
     Spaces,
     Agents,
+    /// Spaces put away rather than closed, waiting to be opened again.
+    Hidden,
+}
+
+/// A space put away rather than closed. Only what it takes to open it again:
+/// the panes and their processes are gone, exactly as if it had been closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenSpace {
+    /// The workspace id it carried while it was open.
+    pub id: String,
+    /// Its custom name, if it had one. None restores the auto name from `cwd`.
+    pub label: Option<String>,
+    pub cwd: std::path::PathBuf,
+}
+
+impl HiddenSpace {
+    /// What the sidebar row reads, matching the label the space carried.
+    pub fn display_label(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| crate::workspace::derive_label_from_cwd(&self.cwd))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1297,9 @@ pub enum ContextMenuKind {
         has_worktree_children: bool,
         collapsed: bool,
     },
+    HiddenSpace {
+        workspace_id: String,
+    },
     Tab {
         ws_idx: usize,
         tab_idx: usize,
@@ -1269,16 +1325,22 @@ pub struct ContextMenuState {
 impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec!["Rename", "Hide", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec![
+                "Rename",
+                "Hide",
+                "Close",
+                "New worktree",
+                "Open worktree...",
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => vec!["Rename", "Close", "Delete worktree checkout..."],
+            } => vec!["Rename", "Hide", "Close", "Delete worktree checkout..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
@@ -1286,11 +1348,13 @@ impl ContextMenuState {
                 ..
             } => vec![
                 "Rename",
+                "Hide group",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 if collapsed { "Expand" } else { "Collapse" },
             ],
+            ContextMenuKind::HiddenSpace { .. } => vec!["Restore"],
             ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 source_pane_id,
@@ -1455,6 +1519,12 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Spaces put away, newest first. Session data, not a sidebar preference:
+    /// it outlives the sidebar and comes back with the session.
+    pub hidden_spaces: Vec<HiddenSpace>,
+    /// The put-away space the hidden view is pointing at. Client-side only: it
+    /// picks a row to act on and never reaches the runtime.
+    pub selected_hidden_space: Option<String>,
     /// Frame for the sidebar's working indicator. Only advances while some agent is
     /// working, so an idle sidebar redraws no more often than it did before.
     pub agent_spinner_frame: u64,
@@ -1898,6 +1968,8 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hidden_spaces: Vec::new(),
+            selected_hidden_space: None,
             agent_spinner_frame: 0,
             next_agent_spinner_tick: None,
             request_complete_onboarding: false,
@@ -2349,6 +2421,10 @@ impl AppState {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(ws_idx, "context menu workspace")
                 }
+                ContextMenuKind::HiddenSpace { ref workspace_id } => assert!(
+                    self.hidden_space(workspace_id).is_some(),
+                    "context menu references hidden space {workspace_id} that is no longer hidden"
+                ),
                 ContextMenuKind::Tab { ws_idx, tab_idx } => {
                     assert_tab_index(ws_idx, tab_idx, "context menu tab")
                 }
@@ -2682,7 +2758,7 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "Delete worktree checkout..."]
+            &["Rename", "Hide", "Close", "Delete worktree checkout..."]
         );
     }
 
@@ -2702,7 +2778,13 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            &[
+                "Rename",
+                "Hide",
+                "Close",
+                "New worktree",
+                "Open worktree..."
+            ]
         );
     }
 
@@ -2724,6 +2806,7 @@ mod tests {
             menu.items(),
             &[
                 "Rename",
+                "Hide group",
                 "Close group",
                 "New worktree",
                 "Open worktree...",

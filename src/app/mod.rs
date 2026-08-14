@@ -572,6 +572,11 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            hidden_spaces: restored
+                .as_ref()
+                .map(|snap| state::AppState::hidden_spaces_from_snapshot(&snap.hidden_spaces))
+                .unwrap_or_default(),
+            selected_hidden_space: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -873,6 +878,8 @@ impl App {
         app.state.sidebar_section_split = sidebar.sidebar_section_split;
         app.state.collapsed_space_keys = sidebar.collapsed_space_keys;
         app.state.sidebar_view = sidebar.sidebar_view;
+        app.state.hidden_spaces =
+            state::AppState::hidden_spaces_from_snapshot(&snapshot.hidden_spaces);
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -2107,6 +2114,7 @@ mod tests {
             sidebar_section_split: Some(0.25),
             collapsed_space_keys: ["group-key".to_string()].into_iter().collect(),
             sidebar_agents_view: true,
+            hidden_spaces: Vec::new(),
         }
     }
 

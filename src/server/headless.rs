@@ -1269,6 +1269,7 @@ impl HeadlessServer {
             self.app.state.active,
             self.app.state.selected,
             self.app.state.sidebar_snapshot_state(),
+            self.app.state.hidden_spaces_snapshot(),
         );
 
         let mut handoff_entries = Vec::new();

@@ -25,6 +25,23 @@ impl AppState {
         self.sidebar_content_rect()
     }
 
+    /// Empty unless the hidden view is showing.
+    fn hidden_list_body_rect(&self) -> Rect {
+        if self.sidebar_view != SidebarView::Hidden || self.sidebar_collapsed {
+            return Rect::default();
+        }
+        crate::ui::hidden_list_body_rect(self.sidebar_content_rect())
+    }
+
+    /// The hidden space this row lists, in the hidden view.
+    pub(crate) fn hidden_space_at_row(&self, row: u16) -> Option<String> {
+        let body = self.hidden_list_body_rect();
+        self.hidden_spaces
+            .iter()
+            .enumerate()
+            .find_map(|(idx, hidden)| {
+                (crate::ui::hidden_space_row_y(body, idx) == Some(row)).then(|| hidden.id.clone())
+            })
     }
 
     /// Empty unless the agents view is showing.
@@ -35,11 +52,25 @@ impl AppState {
         self.sidebar_content_rect()
     }
 
+    /// The view tab rects in the shared header row, in `SIDEBAR_VIEW_TABS` order.
+    pub(crate) fn sidebar_view_tab_rects(&self) -> Option<[Rect; 3]> {
         let content = self.sidebar_content_rect();
         (content != Rect::default()).then(|| crate::ui::sidebar_view_tab_rects(content))
     }
 
     pub(super) fn sidebar_view_tab_at(&self, col: u16, row: u16) -> Option<SidebarView> {
+        let rects = self.sidebar_view_tab_rects()?;
+        crate::ui::SIDEBAR_VIEW_TABS
+            .iter()
+            .zip(rects)
+            .find_map(|((view, _), rect)| {
+                (rect.width > 0
+                    && col >= rect.x
+                    && col < rect.x + rect.width
+                    && row >= rect.y
+                    && row < rect.y + rect.height)
+                    .then_some(*view)
+            })
     }
 
     /// The nested agent row under a space row, in the spaces view.
@@ -317,8 +348,6 @@ impl AppState {
         self.mark_session_dirty();
     }
 
-        }
-        }
     pub(super) fn workspace_at_row(&self, row: u16) -> Option<usize> {
         if self.workspace_list_rect() == Rect::default() {
             return None;
@@ -552,6 +581,108 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    fn app_with_one_hidden_space() -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("open")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.hidden_spaces = vec![crate::app::state::HiddenSpace {
+            id: "ws_9".into(),
+            label: Some("away".into()),
+            cwd: "/repo/away".into(),
+        }];
+        app
+    }
+
+    #[test]
+    fn clicking_the_hidden_tab_switches_to_the_hidden_view() {
+        let mut app = app_with_one_hidden_space();
+        let tabs = app.state.sidebar_view_tab_rects().expect("view tabs");
+        let hidden_tab = tabs[2];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hidden_tab.x,
+            hidden_tab.y,
+        ));
+
+        assert_eq!(app.state.sidebar_view, SidebarView::Hidden);
+        assert_eq!(app.state.workspace_list_rect(), Rect::default());
+    }
+
+    #[test]
+    fn clicking_a_hidden_space_asks_for_it_back() {
+        let mut app = app_with_one_hidden_space();
+        app.state.sidebar_view = SidebarView::Hidden;
+        let body = crate::ui::hidden_list_body_rect(app.state.sidebar_content_rect());
+        let row = crate::ui::hidden_space_row_y(body, 0).expect("the entry has a row");
+
+        assert_eq!(app.state.hidden_space_at_row(row).as_deref(), Some("ws_9"));
+    }
+
+    /// A left click points at a put-away space without dragging it back into the
+    /// session; only the right-click menu does that.
+    #[test]
+    fn left_clicking_a_hidden_space_only_points_at_it() {
+        let mut app = app_with_one_hidden_space();
+        app.state.sidebar_view = SidebarView::Hidden;
+        app.state.mode = Mode::Navigate;
+        let body = crate::ui::hidden_list_body_rect(app.state.sidebar_content_rect());
+        let row = crate::ui::hidden_space_row_y(body, 0).expect("the entry has a row");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 1,
+            row,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.hidden_spaces.len(), 1);
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.selected_hidden_space.as_deref(), Some("ws_9"));
+    }
+
+    #[test]
+    fn right_clicking_a_hidden_space_offers_to_restore_it() {
+        let mut app = app_with_one_hidden_space();
+        app.state.sidebar_view = SidebarView::Hidden;
+        let body = crate::ui::hidden_list_body_rect(app.state.sidebar_content_rect());
+        let row = crate::ui::hidden_space_row_y(body, 0).expect("the entry has a row");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            body.x + 1,
+            row,
+        ));
+
+        let menu = app.state.context_menu.as_ref().expect("hidden space menu");
+        assert_eq!(
+            menu.kind,
+            crate::app::state::ContextMenuKind::HiddenSpace {
+                workspace_id: "ws_9".into()
+            }
+        );
+        assert_eq!(menu.items(), &["Restore"]);
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.selected_hidden_space.as_deref(), Some("ws_9"));
+        let menu_rect = app.state.context_menu_rect().expect("menu rect");
+        assert!(
+            menu_rect.y > row,
+            "the menu covers the row it came from: {menu_rect:?} over row {row}"
+        );
+    }
+
+    /// The rows only exist in their own view; the spaces tree owns those rows.
+    #[test]
+    fn hidden_rows_do_not_answer_from_the_spaces_view() {
+        let app = app_with_one_hidden_space();
+        let body = crate::ui::hidden_list_body_rect(app.state.sidebar_content_rect());
+
+        assert_eq!(app.state.sidebar_view, SidebarView::Spaces);
+        assert_eq!(app.state.hidden_space_at_row(body.y), None);
+    }
 
     #[test]
     fn clicking_launcher_opens_global_menu() {
@@ -1928,6 +2059,7 @@ mod tests {
     #[test]
     fn clicking_view_tabs_switches_sidebar_views() {
         let mut app = app_for_mouse_test();
+        let [spaces, agents, _hidden] = app.state.sidebar_view_tab_rects().expect("tab rects");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

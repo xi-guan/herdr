@@ -4286,6 +4286,22 @@
           ],
           "type": "object"
         },
+        "WorkspaceUnhideParams": {
+          "properties": {
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "description": "Id the workspace carried before it was hidden.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceWorktreeInfo": {
           "properties": {
             "checkout_path": {
@@ -4728,6 +4744,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.hide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.unhide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceUnhideParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.hidden_list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
             }
           },
           "required": [
@@ -7051,6 +7115,26 @@
           ],
           "type": "string"
         },
+        "HiddenWorkspaceInfo": {
+          "description": "A workspace that was hidden instead of closed. Its panes are gone; this is\nwhat it takes to open it again.",
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "label",
+            "cwd"
+          ],
+          "type": "object"
+        },
         "InstalledPluginInfo": {
           "properties": {
             "actions": {
@@ -8733,6 +8817,25 @@
               "required": [
                 "type",
                 "workspaces"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "hidden": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/HiddenWorkspaceInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "hidden_workspace_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "hidden"
               ],
               "type": "object"
             },

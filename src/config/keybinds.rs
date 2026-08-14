@@ -314,6 +314,7 @@ pub struct Keybinds {
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
+    pub hide_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
@@ -482,6 +483,7 @@ impl Config {
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
             close_workspace: empty_action!(),
+            hide_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
             detach: empty_action!(),
@@ -610,6 +612,7 @@ impl Config {
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
+            apply_action!(keybinds.hide_workspace, hide_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
             apply_action!(keybinds.detach, detach, source);
@@ -1609,10 +1612,18 @@ next_tab = "prefix+n"
         );
     }
 
+    /// tmux binds last-pane to `prefix+;`, and going back to where you jumped from is
+    /// the other half of `prefix+o`, so it is worth a default rather than a mention.
     #[test]
-    fn back_and_forth_keybinds_are_unset_by_default() {
+    fn last_pane_uses_tmux_prefix_semicolon_by_default() {
         let kb = Config::default().keybinds();
-        assert!(kb.last_pane.bindings.is_empty());
+        assert_eq!(
+            binding_triggers(&kb.last_pane),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char(';'),
+                KeyModifiers::empty()
+            ))]
+        );
     }
 
     #[test]

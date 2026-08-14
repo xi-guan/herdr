@@ -90,6 +90,15 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             "done",
             app,
         ),
+        // the chip takes the blocked tier: the set is mixed, and of the two halves
+        // this is the one that is actually holding something up
+        Some(NavigatorStateFilter::Waiting) => push_state_chip(
+            &mut spans,
+            crate::detect::AgentState::Blocked,
+            true,
+            "waiting",
+            app,
+        ),
         None if query.is_empty() => spans.push(Span::styled(
             "search panes",
             Style::default().fg(p.overlay0),

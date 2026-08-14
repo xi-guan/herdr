@@ -40,6 +40,23 @@ pub struct WorkspaceMoveBlockParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceUnhideParams {
+    /// Id the workspace carried before it was hidden.
+    pub workspace_id: String,
+    #[serde(default)]
+    pub focus: bool,
+}
+
+/// A workspace that was hidden instead of closed. Its panes are gone; this is
+/// what it takes to open it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HiddenWorkspaceInfo {
+    pub workspace_id: String,
+    pub label: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceReportMetadataParams {
     pub workspace_id: String,
     pub source: String,

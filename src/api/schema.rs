@@ -81,6 +81,12 @@ pub enum Method {
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
+    #[serde(rename = "workspace.hide")]
+    WorkspaceHide(WorkspaceTarget),
+    #[serde(rename = "workspace.unhide")]
+    WorkspaceUnhide(WorkspaceUnhideParams),
+    #[serde(rename = "workspace.hidden_list")]
+    WorkspaceHiddenList(EmptyParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

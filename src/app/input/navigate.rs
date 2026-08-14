@@ -232,6 +232,14 @@ impl App {
                     }
                 }
             }
+            // no confirmation: hiding keeps a way back, so it is not the loss
+            // closing is
+            NavigateAction::HideWorkspace => {
+                if let Some(ws_idx) = workspace_action_target(&self.state, context) {
+                    self.hide_workspace_idx_via_api(ws_idx);
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::SwitchWorkspace(idx) => {
                 if let Some(ws_idx) = self.state.workspace_at_visible_position(idx) {
                     self.focus_workspace_idx_via_api(ws_idx);
@@ -434,7 +442,7 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenNotificationTarget => {
-                self.focus_toast_target_via_api();
+                self.focus_waiting_agent_via_api();
                 if self.state.mode == Mode::Navigate {
                     leave_navigate_mode(&mut self.state);
                 }
@@ -459,6 +467,11 @@ impl App {
     pub(crate) fn close_workspace_idx_via_api(&mut self, ws_idx: usize) {
         let workspace_id = self.public_workspace_id(ws_idx);
         self.runtime_workspace_close("tui.workspace.close", workspace_id);
+    }
+
+    pub(crate) fn hide_workspace_idx_via_api(&mut self, ws_idx: usize) {
+        let workspace_id = self.public_workspace_id(ws_idx);
+        self.runtime_workspace_hide("tui.workspace.hide", workspace_id);
     }
 
     pub(crate) fn move_workspace_via_api(&mut self, source_ws_idx: usize, insert_idx: usize) {
@@ -708,6 +721,17 @@ impl App {
             return;
         };
         self.focus_pane_internal_via_api(ws_idx, target.pane_id);
+        self.state.toast = None;
+        self.state.mode = Mode::Terminal;
+    }
+
+    /// See `AppState::focus_waiting_agent`; the jump goes through the API so the
+    /// server stays the one that moves focus.
+    pub(crate) fn focus_waiting_agent_via_api(&mut self) {
+        let Some((ws_idx, pane_id)) = self.state.next_pane_waiting_on_you() else {
+            return;
+        };
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
         self.state.toast = None;
         self.state.mode = Mode::Terminal;
     }
@@ -1386,6 +1410,7 @@ pub(crate) enum NavigateAction {
     RemoveWorktree,
     RenameWorkspace,
     CloseWorkspace,
+    HideWorkspace,
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
@@ -1537,6 +1562,7 @@ fn non_indexed_action_for_key(
         (&kb.remove_worktree, NavigateAction::RemoveWorktree),
         (&kb.rename_workspace, NavigateAction::RenameWorkspace),
         (&kb.close_workspace, NavigateAction::CloseWorkspace),
+        (&kb.hide_workspace, NavigateAction::HideWorkspace),
         (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
@@ -1686,6 +1712,13 @@ pub(super) fn execute_navigate_action_in_context(
                     state.close_selected_workspace();
                     leave_navigate_mode(state);
                 }
+            }
+        }
+        NavigateAction::HideWorkspace => {
+            if let Some(ws_idx) = workspace_action_target(state, context) {
+                state.selected = ws_idx;
+                state.hide_selected_workspace();
+                leave_navigate_mode(state);
             }
         }
         NavigateAction::SwitchWorkspace(idx) => {
@@ -1849,7 +1882,7 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenNotificationTarget => {
-            state.focus_toast_target();
+            state.focus_waiting_agent();
             if state.mode == Mode::Navigate {
                 leave_navigate_mode(state);
             }
@@ -2431,25 +2464,22 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
     }
 
+    /// Reads agent state, not the toast: the toast is gone after a few seconds, and
+    /// the agent is still waiting long after that.
     #[test]
-    fn custom_open_notification_key_focuses_current_toast_target() {
+    fn custom_open_notification_key_goes_to_the_one_agent_waiting() {
         let mut state = state_with_workspaces(&["one", "two"]);
+        state.ensure_test_terminals();
         state.active = Some(0);
         state.selected = 0;
         state.mode = Mode::Navigate;
         state.keybinds.open_notification_target = crate::config::ActionKeybinds::prefix("g");
-        let target_workspace_id = state.workspaces[1].id.clone();
         let target_pane = state.workspaces[1].tabs[0].root_pane;
-        state.toast = Some(crate::app::state::ToastNotification {
-            kind: crate::app::state::ToastKind::NeedsAttention,
-            title: "pi needs attention".into(),
-            context: "two".into(),
-            position: None,
-            target: Some(crate::app::state::ToastTarget {
-                workspace_id: target_workspace_id,
-                pane_id: target_pane,
-            }),
-        });
+        let terminal_id = state.workspaces[1]
+            .terminal_id(target_pane)
+            .cloned()
+            .expect("test terminal");
+        state.terminals.get_mut(&terminal_id).unwrap().state = crate::detect::AgentState::Blocked;
 
         handle_navigate_key(
             &mut state,
@@ -2459,8 +2489,104 @@ mod tests {
         assert_eq!(state.active, Some(1));
         assert_eq!(state.selected, 1);
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(target_pane));
-        assert!(state.toast.is_none());
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    /// Several of them is still a jump, one per press: picking from a list was the extra
+    /// step that made the key not worth reaching for.
+    #[test]
+    fn open_notification_key_walks_the_waiting_agents_one_press_at_a_time() {
+        let mut state = state_with_workspaces(&["one", "two", "three"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Navigate;
+        state.keybinds.open_notification_target = crate::config::ActionKeybinds::prefix("g");
+        for ws_idx in [1, 2] {
+            let pane = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx]
+                .terminal_id(pane)
+                .cloned()
+                .expect("test terminal");
+            state.terminals.get_mut(&terminal_id).unwrap().state =
+                crate::detect::AgentState::Blocked;
+        }
+        let press = |state: &mut AppState| {
+            state.mode = Mode::Navigate;
+            handle_navigate_key(
+                state,
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+            );
+        };
+
+        press(&mut state);
+        assert_eq!(state.active, Some(1), "first press takes the first one");
+
+        press(&mut state);
+        assert_eq!(state.active, Some(2), "pressing again advances");
+
+        press(&mut state);
+        assert_eq!(state.active, Some(1), "and wraps round");
+    }
+
+    /// Blocked panes stay blocked after you look at them, so the walk has to step past
+    /// the one you are sitting in rather than pick it again.
+    #[test]
+    fn open_notification_key_stays_put_when_only_one_waits() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.keybinds.open_notification_target = crate::config::ActionKeybinds::prefix("g");
+        let pane = state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = state.workspaces[1]
+            .terminal_id(pane)
+            .cloned()
+            .expect("test terminal");
+        state.terminals.get_mut(&terminal_id).unwrap().state = crate::detect::AgentState::Blocked;
+
+        for _ in 0..2 {
+            state.mode = Mode::Navigate;
+            handle_navigate_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+            );
+        }
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(pane));
+    }
+
+    /// Finished-while-you-were-away counts as waiting; finished-and-read does not, or
+    /// the key would land on a pane with nothing left to say.
+    #[test]
+    fn waiting_covers_blocked_and_unread_completions_only() {
+        let mut state = state_with_workspaces(&["one", "two", "three"]);
+        state.ensure_test_terminals();
+        let mut set_state = |ws_idx: usize, agent_state: crate::detect::AgentState, seen: bool| {
+            let pane = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx]
+                .terminal_id(pane)
+                .cloned()
+                .expect("test terminal");
+            state.terminals.get_mut(&terminal_id).unwrap().state = agent_state;
+            state.workspaces[ws_idx].tabs[0]
+                .panes
+                .get_mut(&pane)
+                .unwrap()
+                .seen = seen;
+            pane
+        };
+        let working = set_state(0, crate::detect::AgentState::Working, true);
+        let done = set_state(1, crate::detect::AgentState::Idle, false);
+        let read = set_state(2, crate::detect::AgentState::Idle, true);
+
+        let waiting = state.panes_waiting_on_you();
+
+        assert_eq!(waiting.len(), 1, "waiting: {waiting:?}");
+        assert_eq!(waiting[0], (1, done));
+        assert!(!waiting.iter().any(|(_, pane)| *pane == working));
+        assert!(!waiting.iter().any(|(_, pane)| *pane == read));
     }
 
     #[test]

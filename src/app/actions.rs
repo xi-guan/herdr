@@ -17,7 +17,7 @@ use crate::workspace::WorkspaceGitStatus;
 use super::api_helpers::pane_agent_status;
 use super::state::{
     navigator_display_index_of_row, navigator_display_lines, navigator_first_row_at_or_after,
-    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
+    text_matches_query, AgentNotificationDelivery, AppState, HiddenSpace, Mode, NavigatorRow,
     NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
     ToastNotification, ToastTarget, ViewLayout,
 };
@@ -388,6 +388,63 @@ impl AppState {
     pub(crate) fn open_navigator(&mut self) {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         self.open_navigator_from(&terminal_runtimes);
+    }
+
+    /// The panes waiting on you: blocked on an answer, or finished while you were
+    /// looking elsewhere. Read from agent state rather than from the toast, so the
+    /// answer outlives the few seconds the toast is on screen. Walked in layout order
+    /// rather than `panes` order, because this is the order the key cycles through and
+    /// a `HashMap` would shuffle it out from under you.
+    pub(crate) fn panes_waiting_on_you(&self) -> Vec<(usize, PaneId)> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            let pane = tab.panes.get(&pane_id)?;
+                            let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+                            navigator_state_filter_matches(
+                                NavigatorStateFilter::Waiting,
+                                terminal.state,
+                                pane.seen,
+                            )
+                            .then_some((ws_idx, pane_id))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect()
+    }
+
+    /// The next one after wherever you are, wrapping. The key is meant to be pressed
+    /// repeatedly, so landing on the pane you are already sitting in would stall the
+    /// walk; when the focused pane is not itself waiting, start from the top.
+    pub(crate) fn next_pane_waiting_on_you(&self) -> Option<(usize, PaneId)> {
+        let waiting = self.panes_waiting_on_you();
+        let current = self
+            .active
+            .and_then(|ws_idx| Some((ws_idx, self.workspaces.get(ws_idx)?.focused_pane_id()?)));
+        let next = current
+            .and_then(|current| waiting.iter().position(|entry| *entry == current))
+            .map_or(0, |idx| (idx + 1) % waiting.len());
+        waiting.get(next).copied()
+    }
+
+    /// Take me to whoever is waiting, one press at a time. Several of them is still a
+    /// jump rather than a question: the list you would be picking from is the same walk
+    /// this key already does, so asking only adds a step.
+    #[cfg(test)]
+    pub(crate) fn focus_waiting_agent(&mut self) {
+        let Some((ws_idx, pane_id)) = self.next_pane_waiting_on_you() else {
+            return;
+        };
+        self.focus_pane_in_workspace(ws_idx, pane_id);
+        self.toast = None;
+        self.settle_terminal_mode_after_focus();
     }
 
     pub(crate) fn open_navigator_from(
@@ -910,6 +967,9 @@ fn navigator_state_filter_matches(
         NavigatorStateFilter::Working => state == AgentState::Working,
         NavigatorStateFilter::Idle => state == AgentState::Idle && seen,
         NavigatorStateFilter::Done => state == AgentState::Idle && !seen,
+        NavigatorStateFilter::Waiting => {
+            state == AgentState::Blocked || (state == AgentState::Idle && !seen)
+        }
     }
 }
 
@@ -1225,12 +1285,9 @@ impl AppState {
             return;
         }
 
-            return;
-        }
         self.ensure_tree_row_visible(TreeScrollTarget::Space(idx));
     }
 
-            return;
     fn ensure_tree_row_visible(&mut self, target: TreeScrollTarget) -> bool {
         if self.sidebar_collapsed || self.sidebar_view != crate::app::state::SidebarView::Spaces {
             return false;
@@ -1247,26 +1304,22 @@ impl AppState {
             self.view.sidebar_rect,
             self.workspace_scroll,
         );
-            return;
         if self.tree_row_on_screen(target) {
             return true;
         }
 
         if target_entry_idx < self.workspace_scroll {
             self.workspace_scroll = target_entry_idx;
-            return;
             return self.tree_row_on_screen(target);
         }
 
         for _ in 0..entries.len() {
             let previous_scroll = self.workspace_scroll;
-            }
             self.workspace_scroll = crate::ui::normalized_workspace_scroll(
                 self,
                 self.view.sidebar_rect,
                 previous_scroll.saturating_add(1),
             );
-            }
             if self.workspace_scroll == previous_scroll || self.tree_row_on_screen(target) {
                 break;
             }
@@ -1340,7 +1393,6 @@ impl AppState {
             .filter(|pane| !pane.seen)
             .map(|pane| {
                 pane.seen = true;
-            }
                 pane.attached_terminal_id.clone()
             })
             .collect::<Vec<_>>();
@@ -1772,16 +1824,11 @@ impl AppState {
         }
     }
 
-    pub fn close_selected_workspace(&mut self) {
-        if self.workspaces.is_empty() {
-            return;
-        }
-        self.selection = None;
-        self.selection_autoscroll = None;
-        self.mark_session_dirty();
-        let close_indices = self
-            .workspaces
-            .get(self.selected)
+    /// Every workspace index a close of `ws_idx` takes with it: on a worktree
+    /// group parent that is the whole group, otherwise just the one space.
+    pub(crate) fn workspace_close_indices(&self, ws_idx: usize) -> Vec<usize> {
+        self.workspaces
+            .get(ws_idx)
             .and_then(|ws| ws.worktree_space())
             .filter(|space| !space.is_linked_worktree)
             .map(|space| {
@@ -1796,7 +1843,17 @@ impl AppState {
                     .collect::<Vec<_>>()
             })
             .filter(|indices| indices.len() >= 2)
-            .unwrap_or_else(|| vec![self.selected]);
+            .unwrap_or_else(|| vec![ws_idx])
+    }
+
+    pub fn close_selected_workspace(&mut self) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.mark_session_dirty();
+        let close_indices = self.workspace_close_indices(self.selected);
 
         let mut terminal_ids = Vec::new();
         let mut pane_ids = Vec::new();
@@ -1840,6 +1897,51 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
+    }
+
+    /// Remember a space that is about to close so it can be opened again from
+    /// the sidebar. Newest first; hiding a space that is already remembered
+    /// moves it to the front instead of leaving two rows for one space.
+    pub(crate) fn remember_hidden_space(&mut self, hidden: HiddenSpace) {
+        self.hidden_spaces.retain(|entry| entry.id != hidden.id);
+        self.hidden_spaces.insert(0, hidden);
+        self.mark_session_dirty();
+    }
+
+    /// Put the selected space away: the same close, with its name and directory
+    /// remembered first. Takes `identity_cwd` as the directory; the API path owns
+    /// the runtimes and resolves the live one before closing instead.
+    #[cfg(test)]
+    pub(crate) fn hide_selected_workspace(&mut self) {
+        let hidden = self
+            .workspace_close_indices(self.selected)
+            .into_iter()
+            .filter_map(|idx| {
+                let ws = self.workspaces.get(idx)?;
+                Some(HiddenSpace {
+                    id: ws.id.clone(),
+                    label: ws.custom_name.clone(),
+                    cwd: ws.identity_cwd.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        for entry in hidden {
+            self.remember_hidden_space(entry);
+        }
+        self.close_selected_workspace();
+    }
+
+    pub(crate) fn hidden_space(&self, id: &str) -> Option<&HiddenSpace> {
+        self.hidden_spaces.iter().find(|entry| entry.id == id)
+    }
+
+    /// Drop a remembered space. Called once it is open again, or when the user
+    /// decides they are done with it.
+    pub(crate) fn forget_hidden_space(&mut self, id: &str) -> Option<HiddenSpace> {
+        let idx = self.hidden_spaces.iter().position(|entry| entry.id == id)?;
+        let removed = self.hidden_spaces.remove(idx);
+        self.mark_session_dirty();
+        Some(removed)
     }
 
     pub(crate) fn refresh_tab_bar_view(&mut self) {
@@ -4942,6 +5044,51 @@ mod tests {
         assert_eq!(state.selected, 1);
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].custom_name.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn hide_workspace_closes_it_and_keeps_the_way_back() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        state.workspaces[1].identity_cwd = "/repo/b".into();
+        state.selected = 1;
+        state.active = Some(1);
+
+        state.hide_selected_workspace();
+
+        assert_eq!(state.workspaces.len(), 2);
+        let hidden = state.hidden_spaces.first().expect("b is remembered");
+        assert_eq!(hidden.label.as_deref(), Some("b"));
+        assert_eq!(hidden.cwd, std::path::PathBuf::from("/repo/b"));
+        assert_eq!(hidden.display_label(), "b");
+    }
+
+    #[test]
+    fn hiding_the_same_space_twice_leaves_one_row() {
+        let mut state = app_with_workspaces(&["a"]);
+        let hidden = HiddenSpace {
+            id: state.workspaces[0].id.clone(),
+            label: Some("a".into()),
+            cwd: "/repo/a".into(),
+        };
+        state.remember_hidden_space(hidden.clone());
+        state.remember_hidden_space(hidden.clone());
+
+        assert_eq!(state.hidden_spaces.len(), 1);
+        assert_eq!(state.forget_hidden_space(&hidden.id), Some(hidden));
+        assert!(state.hidden_spaces.is_empty());
+    }
+
+    /// An auto-named space comes back under the same name, because the name was
+    /// always the directory.
+    #[test]
+    fn a_hidden_space_without_a_custom_name_reads_as_its_directory() {
+        let hidden = HiddenSpace {
+            id: "ws_1".into(),
+            label: None,
+            cwd: "/repo/herdr".into(),
+        };
+
+        assert_eq!(hidden.display_label(), "herdr");
     }
 
     #[test]

@@ -819,6 +819,14 @@ pub(super) fn apply_context_menu_action(
                 state.mode = Mode::Navigate;
             }
         }
+        (
+            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some("Hide" | "Hide group"),
+        ) => {
+            state.selected = ws_idx;
+            state.hide_selected_workspace();
+            state.mode = Mode::Navigate;
+        }
         (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
@@ -1250,6 +1258,33 @@ impl App {
                     self.state.mode = Mode::Navigate;
                 }
             }
+            // no confirmation: hiding keeps a way back, so it is not the loss
+            // closing is
+            (
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some("Hide" | "Hide group"),
+            ) => {
+                self.hide_workspace_idx_via_api(ws_idx);
+                self.state.mode = Mode::Navigate;
+            }
+            (ContextMenuKind::HiddenSpace { workspace_id }, Some("Restore")) => {
+                let was_listed = self.state.hidden_space(&workspace_id).is_some();
+                self.runtime_workspace_unhide(
+                    "tui.mouse.workspace.unhide",
+                    crate::api::schema::WorkspaceUnhideParams {
+                        workspace_id: workspace_id.clone(),
+                        focus: true,
+                    },
+                );
+                // a space only leaves the list once it is open again, so the
+                // sidebar follows it to the tree; a failed restore stays put
+                if was_listed && self.state.hidden_space(&workspace_id).is_none() {
+                    self.state.selected_hidden_space = None;
+                    self.state.sidebar_view = crate::app::state::SidebarView::Spaces;
+                }
+                self.state.mode = Mode::Terminal;
+            }
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
@@ -1505,6 +1540,27 @@ mod tests {
             crate::app::state::SidebarView::Spaces
         );
         shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn failed_restore_keeps_the_hidden_view() {
+        let mut app = app_with_test_workspaces(&[]);
+        app.state.sidebar_view = crate::app::state::SidebarView::Hidden;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::HiddenSpace {
+                workspace_id: "ws_missing".into(),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        app.apply_context_menu_action_via_api(menu, 0);
+
+        assert_eq!(
+            app.state.sidebar_view,
+            crate::app::state::SidebarView::Hidden
+        );
     }
 
     fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {
@@ -2258,8 +2314,13 @@ mod tests {
             list: MenuListState::new(0),
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let close_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close group")
+            .expect("close group sits in the repo menu");
 
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, close_idx);
 
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);

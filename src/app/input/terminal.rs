@@ -1507,6 +1507,7 @@ mod tests {
             app.state.active,
             app.state.selected,
             app.state.sidebar_snapshot_state(),
+            app.state.hidden_spaces_snapshot(),
         );
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
         assert!(matches!(

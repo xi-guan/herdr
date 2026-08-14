@@ -29,6 +29,18 @@ pub struct SessionSnapshot {
     /// True when the sidebar was last showing the agents view.
     #[serde(default)]
     pub sidebar_agents_view: bool,
+    /// Spaces put away rather than closed, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_spaces: Vec<HiddenSpaceSnapshot>,
+}
+
+/// A space the user put away: enough to open it again, nothing else.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HiddenSpaceSnapshot {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub cwd: PathBuf,
 }
 
 /// Sidebar state carried through a session snapshot.
@@ -197,6 +209,8 @@ struct RawSessionSnapshot {
     collapsed_space_keys: std::collections::HashSet<String>,
     #[serde(default)]
     sidebar_agents_view: bool,
+    #[serde(default)]
+    hidden_spaces: Vec<HiddenSpaceSnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -213,6 +227,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
         sidebar_agents_view: raw.sidebar_agents_view,
+        hidden_spaces: raw.hidden_spaces,
     })
 }
 
@@ -273,6 +288,7 @@ pub fn capture(
     active: Option<usize>,
     selected: usize,
     sidebar: SidebarSnapshotState,
+    hidden_spaces: Vec<HiddenSpaceSnapshot>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -286,6 +302,7 @@ pub fn capture(
         sidebar_section_split: Some(sidebar.section_split),
         collapsed_space_keys: sidebar.collapsed_space_keys,
         sidebar_agents_view: sidebar.agents_view,
+        hidden_spaces,
     }
 }
 
@@ -552,6 +569,7 @@ mod tests {
             state.active,
             state.selected,
             state.sidebar_snapshot_state(),
+            state.hidden_spaces_snapshot(),
         )
     }
 
@@ -617,6 +635,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             sidebar_agents_view: false,
+            hidden_spaces: Vec::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -705,6 +724,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             sidebar_agents_view: false,
+            hidden_spaces: Vec::new(),
             version: SNAPSHOT_VERSION,
         };
 
@@ -895,6 +915,23 @@ mod tests {
         assert!(snapshot.sidebar_agents_view);
     }
 
+    /// A hidden space is only worth hiding if it survives a restart.
+    #[test]
+    fn capture_contract_tracks_hidden_spaces_through_json() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.hidden_spaces = vec![crate::app::state::HiddenSpace {
+            id: "ws_9".into(),
+            label: Some("away".into()),
+            cwd: PathBuf::from("/repo/away"),
+        }];
+
+        let snapshot = capture_from_state(&state);
+        let restored: SessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+
+        let restored =
+            crate::app::state::AppState::hidden_spaces_from_snapshot(&restored.hidden_spaces);
+        assert_eq!(restored, state.hidden_spaces);
     }
 
     #[test]
@@ -1273,6 +1310,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             sidebar_agents_view: false,
+            hidden_spaces: Vec::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

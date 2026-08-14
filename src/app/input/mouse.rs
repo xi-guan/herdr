@@ -431,7 +431,6 @@ impl AppState {
                     return None;
                 }
 
-
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         let grab_offset = match border.direction {
@@ -564,6 +563,13 @@ impl AppState {
                                 self.set_workspace_list_offset_from_bottom(offset_from_bottom);
                             }
                         }
+                        return None;
+                    }
+
+                    // a left click only points at a put-away space: bringing one
+                    // back is deliberate, so it goes through the right-click menu
+                    if let Some(workspace_id) = self.hidden_space_at_row(mouse.row) {
+                        self.selected_hidden_space = Some(workspace_id);
                         return None;
                     }
 
@@ -1023,6 +1029,19 @@ impl AppState {
                     .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     .is_some()
                 {
+                    return None;
+                }
+                if let Some(workspace_id) = self.hidden_space_at_row(mouse.row) {
+                    self.selected_hidden_space = Some(workspace_id.clone());
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::HiddenSpace { workspace_id },
+                        x: mouse.column,
+                        // a menu anchored on the click covers the one-line row it
+                        // came from, and that row is the only thing marking it
+                        y: mouse.row.saturating_add(1),
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
                     return None;
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -1537,27 +1556,6 @@ impl AppState {
             .as_ref()
             .is_some_and(|toast| toast.target.is_some())
             && rect_contains(self.view.toast_hit_area, col, row)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn focus_toast_target(&mut self) {
-        let Some(target) = self.toast.as_ref().and_then(|toast| toast.target.clone()) else {
-            return;
-        };
-        let Some(ws_idx) = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == target.workspace_id)
-        else {
-            return;
-        };
-        let Some(_tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
-            return;
-        };
-
-        self.focus_pane_in_workspace(ws_idx, target.pane_id);
-        self.toast = None;
-        self.settle_terminal_mode_after_focus();
     }
 
     pub(crate) fn scroll_pane_up(
@@ -3549,6 +3547,23 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Navigate);
     }
 
+    /// Menu items are matched by label, so a new item never silently moves what
+    /// these tests click.
+    fn workspace_menu_on(ws_idx: usize, item: &str) -> ContextMenuState {
+        let mut menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx },
+            x: 2,
+            y: 2,
+            list: MenuListState::new(0),
+        };
+        menu.list.highlighted = menu
+            .items()
+            .iter()
+            .position(|candidate| *candidate == item)
+            .unwrap_or_else(|| panic!("{item} sits in the space menu"));
+        menu
+    }
+
     #[test]
     fn clicking_confirm_close_accepts_after_workspace_context_menu_close() {
         let mut app = app_for_mouse_test();
@@ -3557,12 +3572,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(1),
-        });
+        app.state.context_menu = Some(workspace_menu_on(1, "Close"));
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
             &mut app.state,
@@ -3597,19 +3607,15 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.confirm_close = false;
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(1),
-        });
+        let close_idx = workspace_menu_on(1, "Close").list.highlighted;
+        app.state.context_menu = Some(workspace_menu_on(1, "Close"));
         app.state.mode = Mode::ContextMenu;
 
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 2,
+            menu.y + 1 + close_idx as u16,
         ));
 
         assert_eq!(app.state.workspaces.len(), 1);
@@ -4183,6 +4189,41 @@ mod tests {
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
+    }
+
+    /// Right-click is where closing a space already lives, so putting one away
+    /// belongs beside it rather than only on a key.
+    #[test]
+    fn right_click_hide_puts_the_space_away_without_confirmation() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("away"), Workspace::test_new("stays")];
+        app.state.workspaces[0].identity_cwd = "/repo/away".into();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let row = app.state.view.workspace_card_areas[0].rect;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 2, row.y));
+        let menu = app.state.context_menu.as_ref().expect("space context menu");
+        let hide_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Hide")
+            .expect("hide sits in the space menu");
+        let menu_rect = app.state.context_menu_rect().expect("menu rect");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y + 1 + hide_idx as u16,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.mode, Mode::Navigate, "no confirmation to answer");
+        let hidden = app.state.hidden_spaces.first().expect("it is remembered");
+        assert_eq!(hidden.label.as_deref(), Some("away"));
+        assert_eq!(hidden.cwd, std::path::PathBuf::from("/repo/away"));
     }
 
     #[test]

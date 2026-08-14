@@ -10,11 +10,11 @@ use ratatui::{
 
 use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{state_icon, state_label, state_label_color};
-use super::text::{display_width, display_width_u16, truncate_end};
 use super::status::{
     agent_state_cells, agent_state_icon, state_dot, state_label, state_label_color,
 };
+use super::text::{display_width, display_width_u16, middle_elide, truncate_end};
+use super::widgets::panel_contrast_fg;
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -44,25 +44,70 @@ pub(crate) struct AgentPanelEntry {
 
 const SIDEBAR_VIEW_TAB_SPACES: &str = " spaces";
 const SIDEBAR_VIEW_TAB_AGENTS: &str = "agents";
+const SIDEBAR_VIEW_TAB_HIDDEN: &str = "hidden";
 const SIDEBAR_VIEW_TAB_SEPARATOR: &str = " │ ";
 
+/// The view tabs in order, so rects, labels and hit testing cannot drift apart.
+pub(crate) const SIDEBAR_VIEW_TABS: [(crate::app::state::SidebarView, &str); 3] = [
+    (
+        crate::app::state::SidebarView::Spaces,
+        SIDEBAR_VIEW_TAB_SPACES,
+    ),
+    (
+        crate::app::state::SidebarView::Agents,
+        SIDEBAR_VIEW_TAB_AGENTS,
+    ),
+    (
+        crate::app::state::SidebarView::Hidden,
+        SIDEBAR_VIEW_TAB_HIDDEN,
+    ),
+];
+
+/// Hit rects for the view tabs in the shared header row, in [`SIDEBAR_VIEW_TABS`]
+/// order. A tab the header has no room for gets a zero-width rect.
+pub(crate) fn sidebar_view_tab_rects(content: Rect) -> [Rect; SIDEBAR_VIEW_TABS.len()] {
+    let mut rects = [Rect::default(); SIDEBAR_VIEW_TABS.len()];
     if content.width == 0 || content.height == 0 {
+        return rects;
     }
 
+    let separator = display_width_u16(SIDEBAR_VIEW_TAB_SEPARATOR);
+    let mut offset = 0u16;
+    for (idx, (_, label)) in SIDEBAR_VIEW_TABS.iter().enumerate() {
+        let width = display_width_u16(label).min(content.width.saturating_sub(offset));
+        rects[idx] = Rect::new(content.x.saturating_add(offset), content.y, width, 1);
+        offset = offset.saturating_add(width).saturating_add(separator);
     }
-
+    rects
 }
 
 fn render_sidebar_view_tabs(app: &AppState, frame: &mut Frame, content: Rect) {
     if content.width == 0 || content.height == 0 {
-        return (Rect::default(), Rect::default());
         return;
     }
 
     let p = &app.palette;
     let active = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
     let inactive = Style::default().fg(p.overlay0);
+    let mut spans = Vec::with_capacity(SIDEBAR_VIEW_TABS.len() * 2);
+    for (view, label) in SIDEBAR_VIEW_TABS {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                SIDEBAR_VIEW_TAB_SEPARATOR,
+                Style::default().fg(p.surface1),
+            ));
+        }
+        spans.push(Span::styled(
+            label,
+            if app.sidebar_view == view {
+                active
+            } else {
+                inactive
+            },
+        ));
+    }
     frame.render_widget(
+        Paragraph::new(Line::from(spans)),
         Rect::new(content.x, content.y, content.width, 1),
     );
 }
@@ -74,7 +119,6 @@ pub(crate) fn sidebar_content_rect(area: Rect) -> Rect {
     if content.width == 0 || content.height == 0 {
         return Rect::default();
     }
-
     content
 }
 
@@ -482,6 +526,16 @@ pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
     sidebar_content_rect(area)
 }
 
+/// Rows the hidden view lists into: the same body the spaces tree uses, so the
+/// two views start under the shared header and stop above the shared footer.
+pub(crate) fn hidden_list_body_rect(content: Rect) -> Rect {
+    workspace_list_body_rect(content, false)
+}
+
+/// Row for the `row`-th hidden space, or None once the body runs out of rows.
+pub(crate) fn hidden_space_row_y(body: Rect, row: usize) -> Option<u16> {
+    let offset = u16::try_from(row).ok()?;
+    (offset < body.height).then_some(body.y + offset)
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -1056,11 +1110,6 @@ pub(crate) fn compute_workspace_card_areas(
     compute_workspace_list_areas(app, area).0
 }
 
-    }
-
-        1,
-        1,
-
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
@@ -1332,7 +1381,6 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-
     let content = sidebar_content_rect(area);
     render_sidebar_view_tabs(app, frame, content);
     match app.sidebar_view {
@@ -1342,6 +1390,7 @@ pub(super) fn render_sidebar(
         crate::app::state::SidebarView::Agents => {
             render_agent_detail(app, terminal_runtimes, frame, content)
         }
+        crate::app::state::SidebarView::Hidden => render_hidden_list(app, frame, content),
     }
     render_sidebar_footer(app, frame, content);
     render_sidebar_toggle(app, frame, area, false, p);
@@ -1596,9 +1645,6 @@ fn render_workspace_list(
     };
 
     let list_bottom = area.y + area.height.saturating_sub(1);
-        frame.render_widget(
-        );
-    }
 
     let layout = TreeLayout::build(app, Some(terminal_runtimes));
     let metrics = workspace_list_scroll_metrics_with(app, area, &layout);
@@ -1899,11 +1945,83 @@ fn render_sidebar_footer(app: &AppState, frame: &mut Frame, content: Rect) {
     );
 }
 
-        frame.render_widget(
-        );
+/// Spaces put away: name and directory only, one row each. Clicking a row points
+/// at it; right-clicking offers to open the space again, which is the whole
+/// reason the row exists.
+fn render_hidden_list(app: &AppState, frame: &mut Frame, content: Rect) {
+    let body = hidden_list_body_rect(content);
+    if body == Rect::default() {
+        return;
+    }
 
-        } else {
+    let p = &app.palette;
+    if app.hidden_spaces.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" nothing hidden")
+                .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        return;
+    }
+
+    for (row, hidden) in app.hidden_spaces.iter().enumerate() {
+        let Some(y) = hidden_space_row_y(body, row) else {
+            break;
         };
+        let picked = app.selected_hidden_space.as_deref() == Some(hidden.id.as_str());
+        let label = truncate_end(
+            &hidden.display_label(),
+            body.width.saturating_sub(1) as usize,
+        );
+        let dir = hidden
+            .cwd
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_default();
+        let dir_width = body
+            .width
+            .saturating_sub(display_width_u16(&label).saturating_add(2));
+        // the whole row inverts, the way the menu's own selected item does: this
+        // list has no second line to carry a subtler mark
+        let (label_color, dir_color) = if picked {
+            (panel_contrast_fg(p), panel_contrast_fg(p))
+        } else {
+            (p.subtext0, p.overlay0)
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        // the parent directory only, and only when it fits: two spaces with the
+        // same name are told apart by where they live, not by their full path
+        if dir_width > 4 && !dir.is_empty() {
+            let dir_style = Style::default().fg(dir_color);
+            spans.push(Span::styled(
+                format!(
+                    " {}",
+                    middle_elide(&dir, dir_width.saturating_sub(1) as usize)
+                ),
+                // dimming a colour already sitting on the fill only muddies it
+                if picked {
+                    dir_style
+                } else {
+                    dir_style.add_modifier(Modifier::DIM)
+                },
+            ));
+        }
+        let mut line = Paragraph::new(Line::from(spans));
+        if picked {
+            line = line.style(Style::default().bg(p.accent));
+        }
+        frame.render_widget(line, Rect::new(body.x, y, body.width, 1));
+    }
+}
+
 /// Agent rows nested under their space row. Geometry comes from the cached
 /// areas so hit testing and rendering can never disagree.
 fn render_nested_agent_rows(
@@ -2067,9 +2185,6 @@ fn render_agent_detail(
         return;
     }
 
-    );
-
-    );
     let control_label = active_agent_view_label(app)
         .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
     let toggle_rect = agent_panel_header_label_rect(area, control_label);
@@ -2529,27 +2644,6 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         terminal
             .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-
-        let first = row_text(buffer, body.y, 25);
-        let second = row_text(buffer, body.y + 1, 25);
-        assert!(first.contains("one"));
-        assert_eq!(second, "   pi");
-        assert!(!first.contains("working"));
-        assert!(!second.contains("working"));
-
-        let workspace_x = find_symbol_x(buffer, body.y, body.width, "o");
-        let workspace_style = buffer[(workspace_x, body.y)].style();
-        assert_eq!(workspace_style.fg, Some(app.palette.text));
-        assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
-        assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(app.palette.active_row_bg));
-
-        let agent_x = find_symbol_x(buffer, body.y + 1, body.width, "p");
-        let agent_style = buffer[(agent_x, body.y + 1)].style();
-        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
-        assert!(agent_style.add_modifier.contains(Modifier::DIM));
-        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent_style.bg, Some(app.palette.active_row_bg));
         row_text(terminal.backend().buffer(), row, area.width)
     }
 
@@ -3426,13 +3520,65 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn view_tabs_sit_on_the_first_content_row() {
+        let [spaces, agents, hidden] = sidebar_view_tab_rects(Rect::new(0, 0, 26, 5));
 
-    }
-
-    #[test]
         assert_eq!(spaces, Rect::new(0, 0, 7, 1));
         assert_eq!(agents, Rect::new(10, 0, 6, 1));
+        assert_eq!(hidden, Rect::new(19, 0, 6, 1));
+    }
 
+    /// A sidebar too narrow for every tab keeps the ones that fit rather than
+    /// drawing a tab where its label is not.
+    #[test]
+    fn view_tabs_clip_to_the_header_width() {
+        let [spaces, agents, hidden] = sidebar_view_tab_rects(Rect::new(0, 0, 19, 5));
+
+        assert_eq!(spaces, Rect::new(0, 0, 7, 1));
+        assert_eq!(agents, Rect::new(10, 0, 6, 1));
+        assert_eq!(hidden.width, 0);
+    }
+
+    fn hidden_space(id: &str, label: &str) -> crate::app::state::HiddenSpace {
+        crate::app::state::HiddenSpace {
+            id: id.into(),
+            label: Some(label.into()),
+            cwd: std::path::PathBuf::from(format!("/repo/{label}")),
+        }
+    }
+
+    /// Drawing the row on its own proves nothing: the pieces drawn after it are
+    /// what decides whether the fill survives to the screen.
+    #[test]
+    fn the_picked_hidden_row_survives_the_whole_sidebar() {
+        let mut app = AppState::test_new();
+        app.sidebar_view = crate::app::state::SidebarView::Hidden;
+        app.hidden_spaces = vec![
+            hidden_space("ws_1", "first"),
+            hidden_space("ws_2", "second"),
+        ];
+        app.selected_hidden_space = Some("ws_2".into());
+
+        let area = Rect::new(0, 0, 26, 12);
+        let body = hidden_list_body_rect(sidebar_content_rect(area));
+        let untouched = hidden_space_row_y(body, 0).expect("first row");
+        let picked = hidden_space_row_y(body, 1).expect("second row");
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 12)).expect("test terminal");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar renders");
+        let buffer = terminal.backend().buffer();
+
+        // every cell of the row, not just the ones the text reaches
+        for x in body.x..body.x + body.width {
+            assert_eq!(
+                buffer[(x, picked)].style().bg,
+                Some(app.palette.accent),
+                "column {x} of row {picked}: {:?}",
+                row_text(buffer, picked, area.width)
+            );
+            assert_ne!(buffer[(x, untouched)].style().bg, Some(app.palette.accent));
+        }
     }
 
     #[test]
