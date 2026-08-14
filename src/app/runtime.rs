@@ -297,6 +297,8 @@ impl App {
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
 
+        changed |= self.state.tick_agent_spinner(now);
+
         if self
             .config_diagnostic_deadline
             .is_some_and(|deadline| now >= deadline)

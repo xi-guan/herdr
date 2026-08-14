@@ -52,7 +52,12 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
-        match self.create_workspace_with_launch_env(cwd, params.focus, extra_env) {
+        match self.create_workspace_with_launch_env(
+            cwd,
+            params.focus,
+            extra_env,
+            params.second_column,
+        ) {
             Ok(index) => {
                 if let Some(label) = params.label {
                     if let Some(workspace) = self.state.workspaces.get_mut(index) {
@@ -330,6 +335,9 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+                // a space taken back opens like any new one: as a pair, not as
+                // the single column its old layout is gone from
+                second_column: true,
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {
         self.state
             .workspaces
@@ -352,6 +360,77 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    fn app_for_create_tests() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.default_shell = super::super::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app
+    }
+
+    fn created_pane_rects(app: &App) -> Vec<ratatui::layout::Rect> {
+        let tab = &app.state.workspaces[0].tabs[0];
+        tab.layout
+            .panes(ratatui::layout::Rect::new(0, 0, 100, 20))
+            .into_iter()
+            .map(|info| info.rect)
+            .collect()
+    }
+
+    // the TUI asks for a space through this handler like any other client, so the
+    // second column has to survive the request instead of living inside creation
+    #[tokio::test]
+    async fn workspace_create_opens_two_columns_when_the_request_asks_for_them() {
+        use super::super::test_support::shutdown_test_runtimes;
+
+        let mut app = app_for_create_tests();
+
+        app.handle_workspace_create(
+            "req".into(),
+            WorkspaceCreateParams {
+                cwd: Some(std::env::temp_dir().display().to_string()),
+                focus: true,
+                label: None,
+                env: Default::default(),
+                second_column: true,
+            },
+        );
+
+        let rects = created_pane_rects(&app);
+        assert_eq!(rects.len(), 2);
+        // side by side, which is the seam a centered sidebar needs
+        assert_eq!(rects[0].y, rects[1].y);
+        assert_ne!(rects[0].x, rects[1].x);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn workspace_create_stays_at_one_pane_by_default() {
+        use super::super::test_support::shutdown_test_runtimes;
+
+        let mut app = app_for_create_tests();
+
+        app.handle_workspace_create(
+            "req".into(),
+            WorkspaceCreateParams {
+                cwd: Some(std::env::temp_dir().display().to_string()),
+                focus: true,
+                label: None,
+                env: Default::default(),
+                second_column: false,
+            },
+        );
+
+        assert_eq!(created_pane_rects(&app).len(), 1);
+        shutdown_test_runtimes(&mut app);
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the
@@ -414,6 +493,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                second_column: false,
             },
         );
 
@@ -472,6 +552,11 @@ mod tests {
         assert!(app.state.workspaces.is_empty());
     }
 
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.pane_ids().len(),
+            2,
+            "it comes back as a pair, like any new space"
+        );
     #[test]
     fn api_workspace_close_event_includes_final_worktree_snapshot() {
         let event_hub = crate::api::EventHub::default();

@@ -22,6 +22,26 @@ use super::state::{
     ToastNotification, ToastTarget, ViewLayout,
 };
 
+#[derive(Clone, Copy)]
+enum TreeScrollTarget {
+    Space(usize),
+    Agent(PaneId),
+}
+
+impl TreeScrollTarget {
+    fn matches(self, entry: &crate::ui::WorkspaceListEntry) -> bool {
+        match (self, entry) {
+            (Self::Space(idx), crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. }) => {
+                *ws_idx == idx
+            }
+            (Self::Agent(target), crate::ui::WorkspaceListEntry::AgentPane { pane_id, .. }) => {
+                *pane_id == target
+            }
+            _ => false,
+        }
+    }
+}
+
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
@@ -1186,18 +1206,21 @@ impl AppState {
             return;
         }
 
-        if self.sidebar_collapsed {
             return;
         }
+        self.ensure_tree_row_visible(TreeScrollTarget::Space(idx));
+    }
 
-        let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
-            )
-        }) else {
             return;
+    fn ensure_tree_row_visible(&mut self, target: TreeScrollTarget) -> bool {
+        if self.sidebar_collapsed || self.sidebar_view != crate::app::state::SidebarView::Spaces {
+            return false;
+        }
+        // workspace_scroll indexes tree rows, so the target position must come
+        // from the tree, not the flat space list
+        let entries = crate::ui::sidebar_tree_entries(self);
+        let Some(target_entry_idx) = entries.iter().position(|entry| target.matches(entry)) else {
+            return false;
         };
 
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -1205,34 +1228,39 @@ impl AppState {
             self.view.sidebar_rect,
             self.workspace_scroll,
         );
-        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-        if cards.iter().any(|card| card.ws_idx == idx) {
             return;
+        if self.tree_row_on_screen(target) {
+            return true;
         }
 
         if target_entry_idx < self.workspace_scroll {
             self.workspace_scroll = target_entry_idx;
             return;
+            return self.tree_row_on_screen(target);
         }
 
-        while !cards.iter().any(|card| card.ws_idx == idx) {
+        for _ in 0..entries.len() {
             let previous_scroll = self.workspace_scroll;
-            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
-            if self.workspace_scroll == previous_scroll {
-                break;
             }
             self.workspace_scroll = crate::ui::normalized_workspace_scroll(
                 self,
                 self.view.sidebar_rect,
-                self.workspace_scroll,
+                previous_scroll.saturating_add(1),
             );
-            if self.workspace_scroll == previous_scroll {
+            }
+            if self.workspace_scroll == previous_scroll || self.tree_row_on_screen(target) {
                 break;
             }
-            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-            if cards.is_empty() {
-                break;
-            }
+        }
+        self.tree_row_on_screen(target)
+    }
+
+    fn tree_row_on_screen(&self, target: TreeScrollTarget) -> bool {
+        let (cards, agent_rows) =
+            crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect);
+        match target {
+            TreeScrollTarget::Space(ws_idx) => cards.iter().any(|card| card.ws_idx == ws_idx),
+            TreeScrollTarget::Agent(pane_id) => agent_rows.iter().any(|row| row.pane_id == pane_id),
         }
     }
 
@@ -1306,8 +1334,9 @@ impl AppState {
         };
         let order = entries
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                crate::ui::WorkspaceListEntry::AgentPane { .. } => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {
@@ -1564,16 +1593,40 @@ impl AppState {
             return;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
-            self,
-            detail_area,
-            self.agent_panel_scroll,
-            idx,
-        );
+        // In the spaces view the agent has its own row under its space, so scroll
+        // to that row instead of the flat agents list.
+        if self.sidebar_view != crate::app::state::SidebarView::Agents {
+            let Some((ws_idx, pane_id)) = crate::ui::agent_panel_entries(self)
+                .get(idx)
+                .map(|entry| (entry.ws_idx, entry.pane_id))
+            else {
+                return;
+            };
+            if !self.ensure_tree_row_visible(TreeScrollTarget::Agent(pane_id)) {
+                let mut expanded = false;
+                // take the group key off the space itself: a linked worktree child
+                // has no parent group state, yet a collapsed group hides its row
+                if let Some(space_key) = self
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(crate::workspace::Workspace::worktree_space)
+                    .map(|space| space.key.clone())
+                {
+                    expanded |= self.collapsed_space_keys.remove(&space_key);
+                }
+                if expanded {
+                    self.mark_session_dirty();
+                }
+                if !self.ensure_tree_row_visible(TreeScrollTarget::Agent(pane_id)) {
+                    self.ensure_workspace_visible(ws_idx);
+                }
+            }
+            return;
+        }
+
+        let content = crate::ui::sidebar_content_rect(self.view.sidebar_rect);
+        self.agent_panel_scroll =
+            crate::ui::agent_panel_scroll_for_target(self, content, self.agent_panel_scroll, idx);
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -4393,6 +4446,7 @@ mod tests {
             mark_agent(&mut state, 0, tab_idx, pane_id);
         }
         state.workspaces[0].tabs[0].layout.focus_pane(root);
+        state.sidebar_view = crate::app::state::SidebarView::Agents;
         crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
 
         state.previous_agent();
@@ -4400,6 +4454,139 @@ mod tests {
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
         assert!(state.agent_panel_scroll > 0);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn previous_agent_in_spaces_view_scrolls_the_tree_instead_of_the_agent_panel() {
+        let mut workspace = Workspace::test_new("one");
+        let root = workspace.tabs[0].root_pane;
+        for idx in 1..20 {
+            workspace.test_add_tab(Some(&format!("tab-{idx}")));
+        }
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        for tab_idx in 0..state.workspaces[0].tabs.len() {
+            let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
+            mark_agent(&mut state, 0, tab_idx, pane_id);
+        }
+        state.workspaces[0].tabs[0].layout.focus_pane(root);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        state.previous_agent();
+
+        let last_idx = state.workspaces[0].tabs.len() - 1;
+        assert_eq!(state.workspaces[0].active_tab, last_idx);
+        assert_eq!(state.sidebar_view, crate::app::state::SidebarView::Spaces);
+        assert_eq!(state.agent_panel_scroll, 0);
+        let target = state.workspaces[0].tabs[last_idx].root_pane;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+        assert!(state.workspace_scroll > 0);
+        assert!(state
+            .view
+            .sidebar_agent_row_areas
+            .iter()
+            .any(|row| row.pane_id == target));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focusing_an_agent_in_a_collapsed_space_expands_it_to_show_the_agent_row() {
+        let mut workspace = Workspace::test_new("one");
+        for idx in 1..8 {
+            workspace.test_add_tab(Some(&format!("tab-{idx}")));
+        }
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        for tab_idx in 0..state.workspaces[0].tabs.len() {
+            let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
+            mark_agent(&mut state, 0, tab_idx, pane_id);
+        }
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        state.previous_agent();
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        let target = state.workspaces[0].focused_pane_id();
+        assert!(state
+            .view
+            .sidebar_agent_row_areas
+            .iter()
+            .any(|row| Some(row.pane_id) == target));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focusing_an_agent_in_a_collapsed_worktree_group_reveals_its_row() {
+        let parent = Workspace::test_new("parent");
+        let parent_pane = parent.tabs[0].root_pane;
+        let child = Workspace::test_new("child");
+        let child_pane = child.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![parent, child];
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        mark_agent(&mut state, 0, 0, parent_pane);
+        mark_agent(&mut state, 1, 0, child_pane);
+        state.collapsed_space_keys.insert("repo-key".into());
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        let target = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .position(|entry| entry.pane_id == child_pane)
+            .expect("child agent should be in the queue");
+        assert!(state.focus_agent_entry(target));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        // the group stays folded: a collapsed group still shows whichever member is
+        // active, so the row is already on screen and nothing needs unfolding
+        assert!(state.collapsed_space_keys.contains("repo-key"));
+        assert!(state
+            .view
+            .sidebar_agent_row_areas
+            .iter()
+            .any(|row| row.pane_id == child_pane));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn ensuring_visibility_terminates_when_the_sidebar_has_no_room_for_rows() {
+        let mut workspace = Workspace::test_new("one");
+        for idx in 1..4 {
+            workspace.test_add_tab(Some(&format!("tab-{idx}")));
+        }
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        for tab_idx in 0..state.workspaces[0].tabs.len() {
+            let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
+            mark_agent(&mut state, 0, tab_idx, pane_id);
+        }
+        // no body rows at all: nothing becomes visible and the scroll never clamps,
+        // so an unbounded scroll-until-visible loop would spin forever here
+        state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 24, 2);
+
+        state.ensure_workspace_visible(0);
+        state.ensure_agent_panel_entry_visible(0);
+
         state.assert_invariants_for_test();
     }
 

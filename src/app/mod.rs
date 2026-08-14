@@ -233,6 +233,44 @@ fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> boo
     auto_updates_enabled(no_session) && check_enabled
 }
 
+struct RestoredSidebar {
+    sidebar_width: u16,
+    sidebar_width_source: state::SidebarWidthSource,
+    sidebar_section_split: f32,
+    collapsed_space_keys: std::collections::HashSet<String>,
+    sidebar_view: state::SidebarView,
+}
+
+fn restored_sidebar(
+    snapshot: Option<&crate::persist::SessionSnapshot>,
+    default_width: u16,
+    mouse_capture: bool,
+) -> RestoredSidebar {
+    RestoredSidebar {
+        sidebar_width: snapshot
+            .and_then(|snap| snap.sidebar_width)
+            .unwrap_or(default_width),
+        sidebar_width_source: if snapshot.is_some_and(|snap| snap.sidebar_width.is_some()) {
+            state::SidebarWidthSource::Persisted
+        } else {
+            state::SidebarWidthSource::ConfigDefault
+        },
+        sidebar_section_split: snapshot
+            .and_then(|snap| snap.sidebar_section_split)
+            .unwrap_or(0.5),
+        collapsed_space_keys: snapshot
+            .map(|snap| snap.collapsed_space_keys.clone())
+            .unwrap_or_default(),
+        // the view tabs are mouse-only for now, so never restore into a view the
+        // user would have no way to leave
+        sidebar_view: if snapshot.is_some_and(|snap| snap.sidebar_agents_view) && mouse_capture {
+            state::SidebarView::Agents
+        } else {
+            state::SidebarView::Spaces
+        },
+    }
+}
+
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -391,32 +429,15 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (
-            workspaces,
-            active,
-            selected,
-            sidebar_width,
-            sidebar_width_source,
-            sidebar_section_split,
-            collapsed_space_keys,
-        ) = if no_session {
-            (
-                Vec::new(),
-                None,
-                0,
-                config.ui.sidebar_width,
-                state::SidebarWidthSource::ConfigDefault,
-                0.5_f32,
-                std::collections::HashSet::new(),
-            )
-        } else if let Some(snap) = crate::persist::load() {
+        let restored = (!no_session).then(crate::persist::load).flatten();
+        let (workspaces, active, selected) = if let Some(snap) = &restored {
             let history = config
                 .experimental
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
             let (ws, terminals, terminal_runtimes) = crate::persist::restore(
-                &snap,
+                snap,
                 history.as_ref(),
                 24,
                 80,
@@ -432,48 +453,27 @@ impl App {
             restored_terminal_runtimes = terminal_runtimes.into();
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
-                (
-                    Vec::new(),
-                    None,
-                    0,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                    if snap.sidebar_width.is_some() {
-                        state::SidebarWidthSource::Persisted
-                    } else {
-                        state::SidebarWidthSource::ConfigDefault
-                    },
-                    snap.sidebar_section_split.unwrap_or(0.5),
-                    snap.collapsed_space_keys,
-                )
+                (Vec::new(), None, 0)
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (
-                    ws,
-                    active,
-                    selected,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                    if snap.sidebar_width.is_some() {
-                        state::SidebarWidthSource::Persisted
-                    } else {
-                        state::SidebarWidthSource::ConfigDefault
-                    },
-                    snap.sidebar_section_split.unwrap_or(0.5),
-                    snap.collapsed_space_keys,
-                )
+                (ws, active, selected)
             }
         } else {
-            (
-                Vec::new(),
-                None,
-                0,
-                config.ui.sidebar_width,
-                state::SidebarWidthSource::ConfigDefault,
-                0.5_f32,
-                std::collections::HashSet::new(),
-            )
+            (Vec::new(), None, 0)
         };
+        let RestoredSidebar {
+            sidebar_width,
+            sidebar_width_source,
+            sidebar_section_split,
+            collapsed_space_keys,
+            sidebar_view,
+        } = restored_sidebar(
+            restored.as_ref(),
+            config.ui.sidebar_width,
+            config.ui.mouse_capture,
+        );
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
 
@@ -531,6 +531,8 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            agent_spinner_frame: 0,
+            next_agent_spinner_tick: None,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -590,6 +592,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                sidebar_agent_row_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -629,6 +632,7 @@ impl App {
             sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
+            sidebar_view,
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
             agent_view_override: None,
@@ -651,6 +655,7 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             tab_bar_position: config.ui.tab_bar_position,
+            sidebar_position: config.ui.sidebar_position,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
             pane_history_persistence: config.experimental.pane_history,
@@ -852,14 +857,16 @@ impl App {
         app.state.selected = snapshot
             .selected
             .min(app.state.workspaces.len().saturating_sub(1));
-        if let Some(width) = snapshot.sidebar_width {
-            app.state.sidebar_width = width;
-            app.state.sidebar_width_source = state::SidebarWidthSource::Persisted;
-        }
-        if let Some(split) = snapshot.sidebar_section_split {
-            app.state.sidebar_section_split = split;
-        }
-        app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        let sidebar = restored_sidebar(
+            Some(snapshot),
+            app.state.sidebar_width,
+            app.state.mouse_capture,
+        );
+        app.state.sidebar_width = sidebar.sidebar_width;
+        app.state.sidebar_width_source = sidebar.sidebar_width_source;
+        app.state.sidebar_section_split = sidebar.sidebar_section_split;
+        app.state.collapsed_space_keys = sidebar.collapsed_space_keys;
+        app.state.sidebar_view = sidebar.sidebar_view;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -978,6 +985,7 @@ impl App {
                         focus: true,
                         label: None,
                         env: Default::default(),
+                        second_column: true,
                     },
                 );
                 needs_render = true;
@@ -1017,6 +1025,7 @@ impl App {
                         focus: true,
                         label: None,
                         env: Default::default(),
+                        second_column: true,
                     },
                 );
                 needs_render = true;
@@ -1494,6 +1503,7 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.tab_bar_position = config.ui.tab_bar_position;
+                self.state.sidebar_position = config.ui.sidebar_position;
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,
@@ -2079,6 +2089,81 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn sidebar_only_snapshot() -> crate::persist::SessionSnapshot {
+        crate::persist::SessionSnapshot {
+            version: 3,
+            workspaces: Vec::new(),
+            active: None,
+            selected: 0,
+            sidebar_width: Some(37),
+            sidebar_section_split: Some(0.25),
+            collapsed_space_keys: ["group-key".to_string()].into_iter().collect(),
+            sidebar_agents_view: true,
+        }
+    }
+
+    #[test]
+    fn cold_start_restores_every_persisted_sidebar_field() {
+        let _guard = config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("cold-start-sidebar");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::persist::save(&sidebar_only_snapshot(), None);
+
+        let mut config = Config::default();
+        config.ui.mouse_capture = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(
+            &config,
+            false,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(app.state.sidebar_width, 37);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::Persisted
+        );
+        assert_eq!(app.state.sidebar_section_split, 0.25);
+        assert!(app.state.collapsed_space_keys.contains("group-key"));
+        assert_eq!(app.state.sidebar_view, state::SidebarView::Agents);
+
+        match previous_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn cold_start_without_mouse_capture_stays_in_the_spaces_view() {
+        let sidebar = restored_sidebar(Some(&sidebar_only_snapshot()), 24, false);
+
+        assert_eq!(sidebar.sidebar_view, state::SidebarView::Spaces);
+    }
+
+    #[test]
+    fn cold_start_without_a_snapshot_falls_back_to_config_defaults() {
+        let sidebar = restored_sidebar(None, 24, true);
+
+        assert_eq!(sidebar.sidebar_width, 24);
+        assert_eq!(
+            sidebar.sidebar_width_source,
+            state::SidebarWidthSource::ConfigDefault
+        );
+        assert_eq!(sidebar.sidebar_section_split, 0.5);
+        assert!(sidebar.collapsed_space_keys.is_empty());
+        assert_eq!(sidebar.sidebar_view, state::SidebarView::Spaces);
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {

@@ -1,9 +1,11 @@
-use ratatui::{layout::Rect, Frame};
+#[cfg(test)]
+use ratatui::layout::Rect;
+use ratatui::Frame;
 
 use super::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 use crate::app::state::ViewState;
 use crate::app::{AppState, Mode};
-use crate::layout::{PaneInfo, SplitBorder};
+use crate::layout::{PaneArea, PaneInfo, SplitBorder};
 use crate::protocol::CursorState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -30,7 +32,7 @@ impl ViewState {
 pub(crate) fn compute_tab_surface(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: PaneArea,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> TabSurfaceLayout {
@@ -41,7 +43,7 @@ pub(crate) fn compute_tab_surface(
             if ws.zoomed {
                 Vec::new()
             } else {
-                ws.layout.splits(area)
+                ws.layout.splits_in(area)
             }
         })
         .unwrap_or_default();
@@ -57,7 +59,7 @@ pub(crate) fn resize_tab_surface(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     tab: &crate::workspace::Tab,
-    area: Rect,
+    area: PaneArea,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     resize_tab_panes(app, terminal_runtimes, tab, area, cell_size);
@@ -198,7 +200,7 @@ mod tests {
         let surface = compute_tab_surface(
             &app,
             &TerminalRuntimeRegistry::new(),
-            area,
+            PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );

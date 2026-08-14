@@ -12,6 +12,9 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
+use super::status::{
+    agent_state_cells, agent_state_icon, state_dot, state_label, state_label_color,
+};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -39,43 +42,40 @@ pub(crate) struct AgentPanelEntry {
     pub tokens: std::collections::HashMap<String, String>,
 }
 
-fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
-    if total_h == 0 {
-        return (0, 0);
+const SIDEBAR_VIEW_TAB_SPACES: &str = " spaces";
+const SIDEBAR_VIEW_TAB_AGENTS: &str = "agents";
+const SIDEBAR_VIEW_TAB_SEPARATOR: &str = " │ ";
+
+    if content.width == 0 || content.height == 0 {
     }
 
-    if total_h < 6 {
-        let ws_h = total_h.div_ceil(2);
-        return (ws_h, total_h.saturating_sub(ws_h));
     }
 
-    let ratio = split_ratio.clamp(0.1, 0.9);
-    let ws_h = ((total_h as f32) * ratio).round() as u16;
-    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
-    let detail_h = total_h.saturating_sub(ws_h);
-    (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+fn render_sidebar_view_tabs(app: &AppState, frame: &mut Frame, content: Rect) {
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
+        return;
     }
 
-    let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
-    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    (ws_area, detail_area)
+    let p = &app.palette;
+    let active = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(p.overlay0);
+    frame.render_widget(
+        Rect::new(content.x, content.y, content.width, 1),
+    );
 }
 
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+/// The expanded sidebar minus its right-hand separator column. Both views fill
+/// it; only one is visible at a time.
+pub(crate) fn sidebar_content_rect(area: Rect) -> Rect {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
+    if content.width == 0 || content.height == 0 {
         return Rect::default();
     }
 
-    let (ws_h, _) = sidebar_section_heights(content.height, split_ratio);
-    Rect::new(content.x, content.y + ws_h, content.width, 1)
+    content
 }
 
 fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
@@ -193,7 +193,12 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indented: bool) -> u16 {
+fn workspace_row_height(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    indented: bool,
+    suppress_branch: bool,
+) -> u16 {
     let (state, seen) = ws.aggregate_state(&app.terminals);
     let label = if indented {
         grouped_child_display_label(
@@ -214,6 +219,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
             ahead_behind: ws.git_ahead_behind(),
             tokens: &token_values,
             suppress_git_details: indented,
+            suppress_branch,
         },
     )
     .len()
@@ -225,11 +231,23 @@ fn workspace_row_height_in_body(
     app: &AppState,
     workspace: &crate::workspace::Workspace,
     indented: bool,
+    suppress_branch: bool,
     body_height: u16,
 ) -> u16 {
-    workspace_row_height(app, workspace, indented).min(body_height)
+    workspace_row_height(app, workspace, indented, suppress_branch).min(body_height)
 }
 
+/// The branch rides on the agent rows, so the space above only carries it while
+/// none are on screen: collapsed, or no agent under it at all.
+fn space_shows_agent_rows(entries: &[WorkspaceListEntry], entry_idx: usize) -> bool {
+    matches!(
+        entries.get(entry_idx.saturating_add(1)),
+        Some(WorkspaceListEntry::AgentPane { .. })
+    )
+}
+
+/// A whole worktree group is one block, so no gap lands before an indented
+/// child — neither between two children nor between a parent and its first one.
 fn workspace_entry_gap(app: &AppState, entries: &[WorkspaceListEntry], entry_idx: usize) -> u16 {
     if entry_idx + 1 < entries.len() && !next_entry_is_indented_workspace(entries, entry_idx) {
         app.sidebar_spaces.row_gap
@@ -300,32 +318,57 @@ pub(crate) fn grouped_child_display_label(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    Workspace {
+        ws_idx: usize,
+        indented: bool,
+    },
+    /// An agent row nested under its own space row in the spaces tree.
+    AgentPane {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+        under_indented: bool,
+    },
 }
 
+/// True when the next *space* row is an indented group child, skipping any
+/// nested agent rows in between so tree connectors stay correct.
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
-    matches!(
-        entries.get(idx.saturating_add(1)),
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
-    )
+    entries
+        .iter()
+        .skip(idx.saturating_add(1))
+        .find_map(|entry| match entry {
+            WorkspaceListEntry::Workspace { indented, .. } => Some(*indented),
+            WorkspaceListEntry::AgentPane { .. } => None,
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
     }
 
-    if workspace_list_entries(app).is_empty() {
+    let layout = TreeLayout::build(app, None);
+    if layout.entries.is_empty() {
         0
     } else {
-        requested.min(workspace_list_bottom_start(app, ws_area))
+        requested.min(workspace_list_bottom_start(app, ws_area, &layout))
     }
 }
 
+/// Space rows only. Use this for workspace selection order, drag-reorder and
+/// the mobile switcher; the sidebar's own geometry uses [`sidebar_tree_entries`].
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
     workspace_list_entries_inner(app, false)
+}
+
+/// Every row the spaces view draws: space rows with their agent rows nested
+/// underneath.
+pub(crate) fn sidebar_tree_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
+    TreeLayout::build(app, None).entries
 }
 
 /// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
@@ -435,9 +478,10 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
-    ws_area
+pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
+    sidebar_content_rect(area)
+}
+
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -452,7 +496,112 @@ pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect 
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
+/// Row height and trailing gap for one tree row. `None` when the row's
+/// workspace is gone, matching the caller's skip behaviour.
+fn tree_entry_metrics(
+    app: &AppState,
+    entries: &[WorkspaceListEntry],
+    entry_idx: usize,
+    agents: &std::collections::HashMap<(usize, crate::layout::PaneId), AgentPanelEntry>,
+    body_height: u16,
+) -> Option<(u16, u16)> {
+    let gap = tree_entry_gap(app, entries, entry_idx);
+    match entries.get(entry_idx)? {
+        WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            let ws = app.workspaces.get(*ws_idx)?;
+            Some((
+                workspace_row_height_in_body(
+                    app,
+                    ws,
+                    *indented,
+                    space_shows_agent_rows(entries, entry_idx),
+                    body_height,
+                ),
+                gap,
+            ))
+        }
+        WorkspaceListEntry::AgentPane {
+            ws_idx, pane_id, ..
+        } => Some((
+            nested_agent_row_height(app, agents.get(&(*ws_idx, *pane_id)), body_height),
+            gap,
+        )),
+    }
+}
+
+/// A space and the agent rows nested under it are one block: the configured row
+/// gap only lands after the last row of that block.
+fn tree_entry_gap(app: &AppState, entries: &[WorkspaceListEntry], entry_idx: usize) -> u16 {
+    if matches!(
+        entries.get(entry_idx.saturating_add(1)),
+        Some(WorkspaceListEntry::AgentPane { .. })
+    ) {
+        // sibling agents get a row for their own rule; a space and its first agent
+        // stay glued, since the space row is already the boundary above them
+        return u16::from(matches!(
+            entries.get(entry_idx),
+            Some(WorkspaceListEntry::AgentPane { .. })
+        ));
+    }
+    if entries.get(entry_idx).is_none() {
+        return 0;
+    }
+    workspace_entry_gap(app, entries, entry_idx)
+}
+
+/// Everything the spaces view needs about the tree, built once per pass.
+/// Rebuilding it is the expensive part of sidebar layout, so callers that need
+/// geometry more than once thread this through instead of recomputing.
+pub(crate) struct TreeLayout {
+    entries: Vec<WorkspaceListEntry>,
+    agents: std::collections::HashMap<(usize, crate::layout::PaneId), AgentPanelEntry>,
+}
+
+impl TreeLayout {
+    fn build(app: &AppState, terminal_runtimes: Option<&TerminalRuntimeRegistry>) -> Self {
+        // one pass over the panes feeds both the row list and the row content
+        let collected = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
+        let mut panes_by_workspace =
+            std::collections::HashMap::<usize, Vec<(usize, crate::layout::PaneId)>>::new();
+        for entry in &collected {
+            panes_by_workspace
+                .entry(entry.ws_idx)
+                .or_default()
+                .push((entry.tab_idx, entry.pane_id));
+        }
+        let mut entries = Vec::with_capacity(collected.len() * 2);
+        for entry in workspace_list_entries_inner(app, false) {
+            let WorkspaceListEntry::Workspace { ws_idx, indented } = entry else {
+                entries.push(entry);
+                continue;
+            };
+            entries.push(WorkspaceListEntry::Workspace { ws_idx, indented });
+            for (tab_idx, pane_id) in panes_by_workspace.get(&ws_idx).into_iter().flatten() {
+                entries.push(WorkspaceListEntry::AgentPane {
+                    ws_idx,
+                    tab_idx: *tab_idx,
+                    pane_id: *pane_id,
+                    under_indented: indented,
+                });
+            }
+        }
+
+        Self {
+            entries,
+            agents: collected
+                .into_iter()
+                .map(|entry| ((entry.ws_idx, entry.pane_id), entry))
+                .collect(),
+        }
+    }
+}
+
+fn workspace_list_visible_count(
+    app: &AppState,
+    area: Rect,
+    scroll: usize,
+    layout: &TreeLayout,
+) -> usize {
     let body = workspace_list_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
         return 0;
@@ -460,18 +609,11 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        let (row_height, gap) = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
-                let Some(ws) = app.workspaces.get(*ws_idx) else {
-                    continue;
-                };
-                (
-                    workspace_row_height_in_body(app, ws, *indented, body.height),
-                    workspace_entry_gap(app, &entries, entry_idx),
-                )
-            }
+    for entry_idx in scroll..layout.entries.len() {
+        let Some((row_height, gap)) =
+            tree_entry_metrics(app, &layout.entries, entry_idx, &layout.agents, body.height)
+        else {
+            continue;
         };
         if used_rows.saturating_add(row_height) > body.height {
             break;
@@ -483,35 +625,41 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
     visible
 }
 
-fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
+fn workspace_list_bottom_start(app: &AppState, area: Rect, layout: &TreeLayout) -> usize {
     let body = workspace_list_body_rect(area, false);
-    let entries = workspace_list_entries(app);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
+    let mut start = layout.entries.len();
+    for entry_idx in (0..layout.entries.len()).rev() {
+        let Some((row_height, gap)) =
+            tree_entry_metrics(app, &layout.entries, entry_idx, &layout.agents, body.height)
+        else {
             continue;
         };
-        let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
+        let needed = row_height.saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = entry_idx;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(layout.entries.len().saturating_sub(1))
 }
 
 pub(crate) fn workspace_list_scroll_metrics(
     app: &AppState,
     area: Rect,
 ) -> crate::pane::ScrollMetrics {
-    let max_scroll = workspace_list_bottom_start(app, area);
+    workspace_list_scroll_metrics_with(app, area, &TreeLayout::build(app, None))
+}
+
+fn workspace_list_scroll_metrics_with(
+    app: &AppState,
+    area: Rect,
+    layout: &TreeLayout,
+) -> crate::pane::ScrollMetrics {
+    let max_scroll = workspace_list_bottom_start(app, area, layout);
     let scroll = app.workspace_scroll.min(max_scroll);
-    let viewport_rows = workspace_list_visible_count(app, area, scroll);
+    let viewport_rows = workspace_list_visible_count(app, area, scroll, layout);
 
     crate::pane::ScrollMetrics {
         offset_from_bottom: max_scroll.saturating_sub(scroll),
@@ -521,7 +669,13 @@ pub(crate) fn workspace_list_scroll_metrics(
 }
 
 pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
-    let metrics = workspace_list_scroll_metrics(app, area);
+    workspace_list_scrollbar_rect_from(area, workspace_list_scroll_metrics(app, area))
+}
+
+fn workspace_list_scrollbar_rect_from(
+    area: Rect,
+    metrics: crate::pane::ScrollMetrics,
+) -> Option<Rect> {
     let body = workspace_list_body_rect(area, true);
     (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
         area.x + area.width.saturating_sub(1),
@@ -537,9 +691,176 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     }
 
     let body_y = area.y.saturating_add(AGENT_PANEL_HEADER_ROWS);
-    let body_height = (area.y + area.height).saturating_sub(body_y);
+    // the new/menu footer row is shared with the spaces view
+    let footer_y = area.y + area.height.saturating_sub(1);
+    let body_height = footer_y.saturating_sub(body_y);
     let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
     Rect::new(area.x, body_y, body_width, body_height)
+}
+
+/// Text that tells two otherwise identical sibling agent rows apart, keyed by
+/// pane. Only spaces with a real collision get entries, so rows stay short
+/// whenever the row already reads unambiguously.
+///
+/// Preference order per collision group: the pane's own label, then its stripped
+/// terminal title, then a 1-based ordinal. A candidate is only used when it makes
+/// every row in the group distinct; otherwise the whole group falls to ordinals.
+fn nested_row_discriminators(
+    app: &AppState,
+    layout: &TreeLayout,
+) -> std::collections::HashMap<(usize, crate::layout::PaneId), String> {
+    let mut groups: std::collections::HashMap<(usize, String), Vec<crate::layout::PaneId>> =
+        std::collections::HashMap::new();
+    for entry in &layout.entries {
+        let WorkspaceListEntry::AgentPane {
+            ws_idx, pane_id, ..
+        } = entry
+        else {
+            continue;
+        };
+        let Some(agent) = layout.agents.get(&(*ws_idx, *pane_id)) else {
+            continue;
+        };
+        let text = tokens::rows_text(&resolved_nested_agent_rows(app, agent));
+        groups.entry((*ws_idx, text)).or_default().push(*pane_id);
+    }
+
+    // once per collision group, not once per member: the candidates and their
+    // distinctness are a property of the whole group
+    let mut discriminators = std::collections::HashMap::new();
+    for ((ws_idx, text), members) in &groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let candidates = members
+            .iter()
+            .map(|member| {
+                layout.agents.get(&(*ws_idx, *member)).and_then(|agent| {
+                    agent
+                        .pane_label
+                        .as_deref()
+                        .or(agent.terminal_title_stripped.as_deref())
+                        .filter(|candidate| !text.contains(candidate))
+                })
+            })
+            .collect::<Vec<_>>();
+        let distinct = candidates.iter().all(Option::is_some)
+            && candidates
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == candidates.len();
+        for (position, member) in members.iter().enumerate() {
+            let label = if distinct {
+                candidates[position].unwrap_or_default().to_string()
+            } else {
+                (position + 1).to_string()
+            };
+            discriminators.insert((*ws_idx, *member), label);
+        }
+    }
+    discriminators
+}
+
+/// Spaces whose agent rows all carry the same tab label. There the tab tells the
+/// rows apart from nothing, so it is dropped; a space whose agents really do sit
+/// in different tabs keeps it.
+fn spaces_with_one_tab_label(layout: &TreeLayout) -> std::collections::HashSet<usize> {
+    use std::collections::hash_map::Entry;
+
+    let mut first: std::collections::HashMap<usize, &Option<String>> =
+        std::collections::HashMap::new();
+    let mut mixed = std::collections::HashSet::new();
+    for ((ws_idx, _), agent) in &layout.agents {
+        match first.entry(*ws_idx) {
+            Entry::Vacant(slot) => {
+                slot.insert(&agent.primary_tab_label);
+            }
+            Entry::Occupied(slot) => {
+                if *slot.get() != &agent.primary_tab_label {
+                    mixed.insert(*ws_idx);
+                }
+            }
+        }
+    }
+    first
+        .into_keys()
+        .filter(|ws_idx| !mixed.contains(ws_idx))
+        .collect()
+}
+
+/// A space's ordinal. Enclosed forms say "which one" rather than "how many", which a
+/// bare digit beside a name does not. Past 20 Unicode stops enclosing and plain digits
+/// are all there is; the slot they are drawn in is sized once for the whole list, so
+/// the names never shift as the count crosses ten.
+fn space_number_label(number: usize) -> String {
+    const FIRST_ENCLOSED: u32 = 0x2460;
+    u32::try_from(number)
+        .ok()
+        .filter(|n| (1..=20).contains(n))
+        .and_then(|n| char::from_u32(FIRST_ENCLOSED + n - 1))
+        .map(String::from)
+        .unwrap_or_else(|| number.to_string())
+}
+
+/// The rightmost column of an agent row, held back on every row so the text never
+/// shifts as the selection moves. Only the focused row draws in it.
+const SELECTION_MARK_WIDTH: u16 = 1;
+
+/// Heavy, where the tree's own rules are light: this one answers "which row am I on",
+/// which every other line in the sidebar has no part in.
+const SELECTION_MARK: &str = "┃";
+
+/// selected at all.
+fn selection_mark_style(p: &Palette, fill: ratatui::style::Color) -> Style {
+}
+
+/// A one-cell fill reads as a hairline, not as a selected row, so an agent with
+/// nothing to say on its second line still gets a blank one.
+const NESTED_AGENT_ROW_MIN_HEIGHT: usize = 2;
+
+fn nested_agent_row_height(
+    app: &AppState,
+    entry: Option<&AgentPanelEntry>,
+    body_height: u16,
+) -> u16 {
+    let rows = entry.map_or(1, |entry| resolved_nested_agent_rows(app, entry).len());
+    (rows.max(NESTED_AGENT_ROW_MIN_HEIGHT).min(u16::MAX as usize) as u16).min(body_height)
+}
+
+fn resolved_nested_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
+    let ws = app.workspaces.get(entry.ws_idx);
+    let branch = ws.and_then(crate::workspace::Workspace::branch);
+    // only a linked worktree child renders the grouped form, and only that form is
+    // named after the branch; a top-level space keeps its own name and its branch
+    let space_label = ws.map(|ws| {
+        let label = ws.display_name_from_terminals(&app.terminals);
+        if ws
+            .worktree_space()
+            .is_some_and(|space| space.is_linked_worktree)
+        {
+            grouped_child_display_label(&label, branch.as_deref(), ws.custom_name.is_some())
+        } else {
+            label
+        }
+    });
+    tokens::nested_agent_rows(
+        &app.sidebar_agents,
+        entry,
+        agent_state_text(entry),
+        tokens::NestedContext {
+            branch: branch.as_deref(),
+            space_label: space_label.as_deref(),
+        },
+    )
+}
+
+fn agent_state_text(entry: &AgentPanelEntry) -> &str {
+    entry
+        .state_labels
+        .get(agent_panel_status_key(entry.state, entry.seen))
+        .map(String::as_str)
+        .unwrap_or_else(|| state_label(entry.state, entry.seen))
 }
 
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
@@ -658,13 +979,17 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
-    if ws_area == Rect::default() {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::SidebarAgentRowArea>,
+) {
+    let ws_area = workspace_list_rect(area);
+    if ws_area == Rect::default() || app.sidebar_view != crate::app::state::SidebarView::Spaces {
         return (Vec::new(), Vec::new());
     }
 
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let layout = TreeLayout::build(app, None);
+    let metrics = workspace_list_scroll_metrics_with(app, ws_area, &layout);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
     if body.width == 0 || body.height == 0 {
         return (Vec::new(), Vec::new());
@@ -674,34 +999,49 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut agent_rows = Vec::new();
 
-    let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        match entry {
+    let entries = &layout.entries;
+    for entry_idx in scroll..entries.len() {
+        let Some((row_height, gap)) =
+            tree_entry_metrics(app, entries, entry_idx, &layout.agents, body.height)
+        else {
+            continue;
+        };
+        if row_y.saturating_add(row_height) > body_bottom {
+            break;
+        }
+        let rect = Rect::new(body.x, row_y, body.width, row_height);
+        match &entries[entry_idx] {
             WorkspaceListEntry::Workspace { ws_idx, indented } => {
-                let Some(ws) = app.workspaces.get(*ws_idx) else {
-                    continue;
-                };
-                let row_height = workspace_row_height_in_body(app, ws, *indented, body.height);
-                let gap = workspace_entry_gap(app, &entries, entry_idx);
-                if row_y.saturating_add(row_height) > body_bottom {
-                    break;
-                }
                 cards.push(crate::app::state::WorkspaceCardArea {
                     ws_idx: *ws_idx,
-                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                    rect,
                     indented: *indented,
                 });
-                row_y = row_y
-                    .saturating_add(row_height)
-                    .saturating_add(gap)
-                    .min(body_bottom);
+            }
+            WorkspaceListEntry::AgentPane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                under_indented,
+            } => {
+                agent_rows.push(crate::app::state::SidebarAgentRowArea {
+                    ws_idx: *ws_idx,
+                    tab_idx: *tab_idx,
+                    pane_id: *pane_id,
+                    rect,
+                    under_indented: *under_indented,
+                });
             }
         }
+        row_y = row_y
+            .saturating_add(row_height)
+            .saturating_add(gap)
+            .min(body_bottom);
     }
 
-    (cards, headers)
+    (cards, agent_rows)
 }
 
 pub(crate) fn compute_workspace_card_areas(
@@ -711,18 +1051,10 @@ pub(crate) fn compute_workspace_card_areas(
     compute_workspace_list_areas(app, area).0
 }
 
-pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCardArea) -> Rect {
-    if card.rect.width == 0 || card.rect.height == 0 {
-        return Rect::default();
     }
 
-    Rect::new(
-        card.rect.x + card.rect.width.saturating_sub(1),
-        card.rect.y,
         1,
         1,
-    )
-}
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
@@ -851,7 +1183,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 Style::default().fg(p.overlay0)
             };
             let (icon, icon_style) =
-                state_icon(detail.state, detail.seen, app.status_indicators, p);
+                agent_state_icon(detail.state, detail.seen, app.agent_spinner_frame, p);
 
             if is_active {
                 let buf = frame.buffer_mut();
@@ -903,7 +1235,7 @@ pub(crate) fn workspace_drop_slots(
                     ws_idx,
                     indented: false,
                 } => Some(*ws_idx),
-                WorkspaceListEntry::Workspace { .. } => None,
+                WorkspaceListEntry::Workspace { .. } | WorkspaceListEntry::AgentPane { .. } => None,
             })
     };
 
@@ -945,7 +1277,9 @@ pub(crate) fn workspace_drop_slots(
         Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
             crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
         }
-        None => crate::app::state::WorkspaceDropTarget::End,
+        Some(WorkspaceListEntry::AgentPane { .. }) | None => {
+            crate::app::state::WorkspaceDropTarget::End
+        }
     };
     let row = last.rect.y.saturating_add(last.rect.height);
     if row < list_bottom
@@ -993,23 +1327,51 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    let content = sidebar_content_rect(area);
+    render_sidebar_view_tabs(app, frame, content);
+    match app.sidebar_view {
+        crate::app::state::SidebarView::Spaces => {
+            render_workspace_list(app, terminal_runtimes, frame, content, is_navigating)
+        }
+        crate::app::state::SidebarView::Agents => {
+            render_agent_detail(app, terminal_runtimes, frame, content)
+        }
+    }
+    render_sidebar_footer(app, frame, content);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// Per-token styles for one rendered row. `workspace` and `agent` are separate
+/// because a nested agent row drops the workspace token, so the agent has to
+/// carry the row's bright tier there or the whole row renders unreadable.
+#[derive(Clone, Copy)]
+struct RowStyles {
+    state_text: Style,
+    workspace: Style,
+    agent: Style,
+    /// Its own tier: the branch keeps one colour whether it sits on the space row
+    /// or on the agent rows that took it over.
+    branch: Style,
+    secondary: Style,
+    custom: Style,
 }
 
 fn resolved_token_spans(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
-    state_text_style: Style,
-    workspace_style: Style,
-    secondary_style: Style,
-    custom_style: Style,
+    styles: RowStyles,
     p: &Palette,
     max_width: usize,
 ) -> Vec<Span<'static>> {
+    let RowStyles {
+        state_text: state_text_style,
+        workspace: workspace_style,
+        agent: agent_style,
+        branch: branch_style,
+        secondary: secondary_style,
+        custom: custom_style,
+    } = styles;
     let fixed_widths = resolved
         .iter()
         .map(|token| match &token.kind {
@@ -1136,10 +1498,19 @@ fn resolved_token_spans(
                     apply_token_style(workspace_style, token.style),
                 ));
             }
-            ResolvedTokenKind::Tab(text)
-            | ResolvedTokenKind::Pane(text)
-            | ResolvedTokenKind::Agent(text)
-            | ResolvedTokenKind::Branch(text) => {
+            ResolvedTokenKind::Agent(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(agent_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::Branch(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(branch_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::Tab(text) | ResolvedTokenKind::Pane(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(secondary_style, token.style),
@@ -1220,20 +1591,55 @@ fn render_workspace_list(
     };
 
     let list_bottom = area.y + area.height.saturating_sub(1);
-    if area.height > 0 {
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                " spaces",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )])),
-            Rect::new(area.x, area.y, area.width, 1),
         );
     }
 
-    let metrics = workspace_list_scroll_metrics(app, area);
-    let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
+    let layout = TreeLayout::build(app, Some(terminal_runtimes));
+    let metrics = workspace_list_scroll_metrics_with(app, area, &layout);
+    let scrollbar_rect = workspace_list_scrollbar_rect_from(area, metrics);
     let cards = &app.view.workspace_card_areas;
     let entries = workspace_list_entries(app);
+
+    // a top-level space always starts a block, so the gap row directly above it
+    // is where the separator goes; at row_gap 0 that row holds content instead
+    let list_body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+    // every top-level space carries the number the collapsed sidebar shows for it.
+    // The slot is sized once from the whole list so the names all end in the same
+    // column rather than shifting when the count crosses ten.
+    let space_numbers = cards
+        .iter()
+        .filter(|card| !card.indented)
+        .enumerate()
+        .map(|(position, card)| (card.ws_idx, position + 1))
+        .collect::<std::collections::HashMap<_, _>>();
+    let number_width = space_numbers
+        .values()
+        .copied()
+        .max()
+        // sized from the label rather than the digits: an enclosed form is one cell
+        // where its number would be two
+        .map_or(0, |highest| {
+            space_number_label(highest).chars().count() as u16
+        });
+    for card in cards {
+        if app.sidebar_spaces.row_gap == 0 || card.indented || card.rect.width == 0 {
+            continue;
+        }
+        let Some(rule_y) = card.rect.y.checked_sub(1) else {
+            continue;
+        };
+        if rule_y < list_body.y || rule_y >= list_bottom {
+            continue;
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "─".repeat(card.rect.width as usize),
+                Style::default().fg(p.space_rule()),
+            )),
+            Rect::new(card.rect.x, rule_y, card.rect.width, 1),
+        );
+    }
 
     for card in cards {
         let i = card.ws_idx;
@@ -1243,7 +1649,18 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
+        // the focused agent's own row carries the highlight, so painting the
+        // space row too would mark the same thing twice
+        let focused_agent_row_shown =
+            app.view.sidebar_agent_row_areas.iter().any(|row| {
+                row.ws_idx == i && app.is_active_pane(row.ws_idx, row.tab_idx, row.pane_id)
+            });
+        let agent_rows_shown = app
+            .view
+            .sidebar_agent_row_areas
+            .iter()
+            .any(|row| row.ws_idx == i);
+        let highlighted = selected || (is_active && !focused_agent_row_shown) || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
@@ -1254,6 +1671,7 @@ fn render_workspace_list(
             } else {
                 p.active_row_bg
             };
+            let mark_style = selection_mark_style(p, bg);
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
                 if y >= list_bottom {
@@ -1262,13 +1680,27 @@ fn render_workspace_list(
                 for x in card.rect.x..card.rect.x + card.rect.width {
                     buf[(x, y)].set_style(Style::default().bg(bg));
                 }
+                // a space only carries the highlight when no agent row does, and it
+                // has to be marked the same way those rows are
+                if let Some(edge) = card
+                    .rect
+                    .x
+                    .checked_add(card.rect.width)
+                    .and_then(|right| right.checked_sub(SELECTION_MARK_WIDTH))
+                {
+                    buf[(edge, y)].set_symbol(SELECTION_MARK);
+                    buf[(edge, y)].set_style(mark_style);
+                }
             }
         }
 
+        // the brightest tier in the tree: a space is the thing you scan for first,
+        // and its chevron still carries the accent that marks it as interactive
+        let name_style = Style::default().fg(p.text);
         let name_style = if selected || is_active || is_dragged {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+            name_style.add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.subtext0)
+            name_style
         };
 
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
@@ -1280,30 +1712,50 @@ fn render_workspace_list(
         let parent_group = (!card.indented)
             .then(|| workspace_parent_group_state(app, i))
             .flatten();
+        let space_entry_idx = entries.iter().position(|entry| {
+            matches!(
+                entry,
+                WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == i
+            )
+        });
         let is_last_child = card.indented
-            && entries
-                .iter()
-                .position(|entry| {
-                    matches!(
-                        entry,
-                        WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == i
-                    )
-                })
+            && space_entry_idx
                 .is_none_or(|entry_idx| !next_entry_is_indented_workspace(&entries, entry_idx));
+        // the same predicate on the same list layout used: `entries` here holds only
+        // space rows, so asking it whether an agent row follows always says no
+        let suppress_branch = layout
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == i)
+            })
+            .is_some_and(|entry_idx| space_shows_agent_rows(&layout.entries, entry_idx));
         let (display_state, display_seen) = parent_group
             .as_ref()
             .filter(|(_, collapsed)| *collapsed)
             .map(|(key, _)| space_aggregate_state(app, key))
             .unwrap_or((agg_state, agg_seen));
-        let state_icon = state_icon(display_state, display_seen, app.status_indicators, p);
+        // each agent row carries its own dot, so the space only speaks for them
+        // while they are hidden: collapsed, or no agent under it at all
+        // the dot keeps the near column: the agent rows hang their own indicator
+        // under it, so it is the line the whole block is built on
+        let state_icon = if agent_rows_shown {
+            state_dot(AgentState::Unknown, false, p)
+        } else {
+            state_dot(display_state, display_seen, p)
+        };
+        // an ordinal is a handle rather than content and rides the far edge, where its
+        // width can change without moving a single name
+        let ordinal = space_numbers
+            .get(&i)
+            .filter(|_| number_width > 0)
+            .map(|number| space_number_label(*number));
         let state_text_style = Style::default()
             .fg(state_label_color(display_state, display_seen, p))
             .add_modifier(Modifier::DIM);
-        let branch_style = Style::default().fg(if selected || is_active {
-            p.mauve
-        } else {
-            p.overlay0
-        });
+        // colour says what kind of token this is, weight says whether it is active:
+        // a branch that only turned mauve when focused sat on the agent tier otherwise
+        let branch_style = Style::default().fg(p.mauve);
         let token_values = ws.metadata_tokens.values();
         let rows = tokens::space_rows(
             &app.sidebar_spaces,
@@ -1314,6 +1766,7 @@ fn render_workspace_list(
                 ahead_behind: ws.git_ahead_behind(),
                 tokens: &token_values,
                 suppress_git_details: card.indented,
+                suppress_branch,
             },
         );
 
@@ -1322,41 +1775,50 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = Vec::new();
+            // every block hangs from its own state-dot column: a top-level space
+            // marks col 1, so its branch and children start there too
             let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
+                spans.push(Span::raw(" "));
                 if row_index == 0 {
                     spans.push(Span::styled(
                         if is_last_child { "└─ " } else { "├─ " },
                         Style::default().fg(p.overlay0),
                     ));
-                    6
+                    4
                 } else if is_last_child {
-                    spans.push(Span::raw("     "));
-                    8
+                    spans.push(Span::raw("   "));
+                    4
                 } else {
                     spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
-                    spans.push(Span::raw("    "));
-                    8
+                    spans.push(Span::raw("  "));
+                    4
                 }
             } else if row_index == 0 {
                 spans.push(Span::raw(" "));
                 1
             } else {
-                spans.push(Span::raw("   "));
+                // the same indicator column an agent row would have. Only a space
+                // with nothing running keeps a second row, and nothing running is
+                // exactly what the structural tier means.
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("│", Style::default().fg(p.surface1)));
+                spans.push(Span::raw(" "));
                 3
             };
-            let trailing_width = if row_index == 0 && parent_group.is_some() {
-                2
-            } else {
-                0
-            };
+            // the selection rule's column plus the ordinal's slot, held back on every
+            // row so a name never shifts as the highlight moves between rows
+            let trailing_width = SELECTION_MARK_WIDTH + number_width;
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
-                state_text_style,
-                name_style,
-                branch_style,
-                branch_style,
+                RowStyles {
+                    state_text: state_text_style,
+                    workspace: name_style,
+                    agent: branch_style,
+                    branch: branch_style,
+                    secondary: branch_style,
+                    custom: branch_style,
+                },
                 p,
                 card.rect
                     .width
@@ -1368,16 +1830,24 @@ fn render_workspace_list(
             );
         }
 
-        if let Some((_, collapsed)) = parent_group {
+        if let Some(text) = ordinal.filter(|_| row_y < list_bottom) {
+            let slot = card
+                .rect
+                .x
+                .saturating_add(card.rect.width)
+                .saturating_sub(SELECTION_MARK_WIDTH + number_width);
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    if collapsed { "▸" } else { "▾" },
-                    Style::default().fg(p.accent),
-                )),
-                workspace_group_chevron_rect(card),
+                // one tier up from the rules: an ordinal is a handle rather than
+                // content, but a handle you cannot read is not one. DIM on top of
+                // this tier is what made it unreadable.
+                Paragraph::new(Span::styled(text, Style::default().fg(p.overlay0)))
+                    .alignment(Alignment::Right),
+                Rect::new(slot, row_y, number_width, 1),
             );
         }
     }
+
+    render_nested_agent_rows(app, &layout, frame, list_bottom);
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
         let indicator_right = scrollbar_rect
@@ -1393,30 +1863,190 @@ fn render_workspace_list(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
+}
 
-    if app.mouse_capture && list_bottom > area.y {
-        let new_rect = app.sidebar_new_button_rect();
+/// The new/menu row at the bottom of the sidebar, shared by both views.
+fn render_sidebar_footer(app: &AppState, frame: &mut Frame, content: Rect) {
+    if !app.mouse_capture || content.height < 2 {
+        return;
+    }
+
+    let p = &app.palette;
+    frame.render_widget(
+        Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
+        app.sidebar_new_button_rect(),
+    );
+
+    let menu_line = if app.global_menu_attention_badge_visible() {
+        Line::from(vec![
+            Span::styled(
+                "● ",
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("menu", Style::default().fg(p.overlay0)),
+        ])
+    } else {
+        Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
+    };
+    frame.render_widget(
+        Paragraph::new(menu_line).alignment(Alignment::Center),
+        app.global_launcher_rect(),
+    );
+}
+
         frame.render_widget(
-            Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
-            new_rect,
         );
 
-        let menu_rect = app.global_launcher_rect();
-        let menu_line = if app.global_menu_attention_badge_visible() {
-            Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("menu", Style::default().fg(p.overlay0)),
-            ])
         } else {
-            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
         };
+/// Agent rows nested under their space row. Geometry comes from the cached
+/// areas so hit testing and rendering can never disagree.
+fn render_nested_agent_rows(
+    app: &AppState,
+    layout: &TreeLayout,
+    frame: &mut Frame,
+    list_bottom: u16,
+) {
+    let areas = &app.view.sidebar_agent_row_areas;
+    if areas.is_empty() {
+        return;
+    }
+
+    let p = &app.palette;
+    let entries = &layout.agents;
+    let discriminators = nested_row_discriminators(app, layout);
+    let one_tab = spaces_with_one_tab_label(layout);
+
+    // one tier under the rule between spaces: same job, but a space boundary
+    // outranks a boundary between two agents of the same space
+    for pair in areas.windows(2) {
+        let (row, next) = (&pair[0], &pair[1]);
+        let rule_y = row.rect.y.saturating_add(row.rect.height);
+        // a different space means the space rule already owns this boundary, and a
+        // missing gap row means the rows are packed with nowhere to put one
+        if row.ws_idx != next.ws_idx || rule_y >= list_bottom || rule_y >= next.rect.y {
+            continue;
+        }
         frame.render_widget(
-            Paragraph::new(menu_line).alignment(Alignment::Right),
-            menu_rect,
+            Paragraph::new(Span::styled(
+                "─".repeat(row.rect.width as usize),
+                Style::default().fg(p.surface1),
+            )),
+            Rect::new(row.rect.x, rule_y, row.rect.width, 1),
         );
+    }
+
+    for area in areas {
+        let Some(entry) = entries.get(&(area.ws_idx, area.pane_id)) else {
+            continue;
+        };
+        let mut rows = resolved_nested_agent_rows(app, entry);
+        if one_tab.contains(&area.ws_idx) {
+            for row in &mut rows {
+                row.retain(|token| !matches!(token.kind, ResolvedTokenKind::Tab(_)));
+            }
+            rows.retain(|row| !row.is_empty());
+        }
+        // appended to the last row, so this never changes the row's height
+        if let Some((extra, last)) = discriminators
+            .get(&(area.ws_idx, area.pane_id))
+            .zip(rows.last_mut())
+        {
+            last.push(ResolvedToken::plain(ResolvedTokenKind::Pane(extra.clone())));
+        }
+        // a real row rather than bare height, so the highlight and the row's own
+        // indentation cover the blank line the same way they cover the content
+        rows.resize(rows.len().max(NESTED_AGENT_ROW_MIN_HEIGHT), Vec::new());
+        let is_active = app.is_active_pane(area.ws_idx, area.tab_idx, area.pane_id);
+        let label_color = state_label_color(entry.state, entry.seen, p);
+        // one tier below the space names above them, and a different hue from the
+        // branch beside them, so the three kinds of name never read as one run
+        let name_style = Style::default().fg(p.blue);
+        let name_style = if is_active {
+            name_style.add_modifier(Modifier::BOLD)
+        } else {
+            name_style
+        };
+        let status_style = if is_active {
+            Style::default().fg(label_color)
+        } else {
+            Style::default().fg(label_color).add_modifier(Modifier::DIM)
+        };
+        // overlay0 already sits at ~3.4:1; DIM on top of it lands near 1.4:1
+        let secondary_style = Style::default().fg(p.overlay0);
+        let (indicator, indicator_style) =
+            agent_state_cells(entry.state, entry.seen, app.agent_spinner_frame, p);
+
+        if is_active {
+            let mark_style = selection_mark_style(p, p.surface_dim);
+            let buf = frame.buffer_mut();
+            for y in area.rect.y..area.rect.y + area.rect.height {
+                if y >= list_bottom {
+                    break;
+                }
+                for x in area.rect.x..area.rect.x + area.rect.width {
+                    // a tier under the indicator and the rules: the fill marks the
+                    // row, and anything drawn on it has to stay readable on top
+                    buf[(x, y)].set_style(Style::default().bg(p.surface_dim));
+                }
+                if let Some(edge) = area
+                    .rect
+                    .x
+                    .checked_add(area.rect.width)
+                    .and_then(|right| right.checked_sub(SELECTION_MARK_WIDTH))
+                {
+                    // a full-cell glyph rather than an eighth-block sliver: the
+                    // sliver could be painted over by a long line of text
+                    buf[(edge, y)].set_symbol(SELECTION_MARK);
+                    buf[(edge, y)].set_style(mark_style);
+                }
+            }
+        }
+
+        for (row_index, resolved) in rows.iter().enumerate() {
+            if row_index as u16 >= area.rect.height || area.rect.y + row_index as u16 >= list_bottom
+            {
+                break;
+            }
+            let mut spans = Vec::new();
+            // flush left with the space rows: the expand chevron is what marks a
+            // space row, so nesting needs neither connectors nor indentation
+            let mut prefix_width = 1u16;
+            spans.push(Span::raw(" "));
+            if row_index > 0 {
+                // the indicator owns this column on both rows, so the two of them
+                // stack into one shape rather than a mark with a gap beneath it
+                spans.push(Span::styled(indicator[1].clone(), indicator_style));
+                spans.push(Span::raw(" "));
+                prefix_width = prefix_width.saturating_add(2);
+            }
+            spans.extend(resolved_token_spans(
+                resolved,
+                (indicator[0].as_str(), indicator_style),
+                RowStyles {
+                    state_text: status_style,
+                    workspace: name_style,
+                    // the agent names this row, so it carries the bright tier
+                    agent: name_style,
+                    branch: Style::default().fg(p.mauve),
+                    secondary: secondary_style,
+                    custom: secondary_style,
+                },
+                p,
+                area.rect
+                    .width
+                    .saturating_sub(prefix_width + SELECTION_MARK_WIDTH) as usize,
+            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(
+                    area.rect.x,
+                    area.rect.y + row_index as u16,
+                    area.rect.width,
+                    1,
+                ),
+            );
+        }
     }
 }
 
@@ -1432,18 +2062,8 @@ fn render_agent_detail(
         return;
     }
 
-    let sep_line = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
     );
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-        )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
     );
     let control_label = active_agent_view_label(app)
         .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
@@ -1493,6 +2113,7 @@ fn render_agent_detail(
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
         let row_style = if is_active {
+            // same tier the tree gives the focused agent row
             Style::default().bg(p.active_row_bg)
         } else {
             Style::default()
@@ -1508,17 +2129,21 @@ fn render_agent_detail(
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+        let state_icon = agent_state_icon(detail.state, detail.seen, app.agent_spinner_frame, p);
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
             let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
+                RowStyles {
+                    state_text: status_style,
+                    workspace: name_style,
+                    agent: agent_style,
+                    branch: Style::default().fg(p.mauve),
+                    secondary: agent_style,
+                    custom: agent_style,
+                },
                 p,
                 body.width
                     .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
@@ -1656,13 +2281,14 @@ mod tests {
         terminal_state.detected_agent = Some(Agent::Pi);
         terminal_state.state = AgentState::Working;
 
+        app.sidebar_view = crate::app::state::SidebarView::Agents;
         let area = Rect::new(0, 0, 26, 20);
         let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let agent_area = sidebar_content_rect(area);
         let body = agent_panel_body_rect(agent_area, false);
 
         let first = row_text(buffer, body.y, 25);
@@ -1708,12 +2334,14 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .clone();
         app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
 
+        app.sidebar_view = crate::app::state::SidebarView::Agents;
+
         let area = Rect::new(0, 0, 26, 20);
         let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let agent_area = sidebar_content_rect(area);
         let body = agent_panel_body_rect(agent_area, false);
         let buffer = terminal.backend().buffer();
         let workspace = buffer[(find_symbol_x(buffer, body.y, body.width, "o"), body.y)].style();
@@ -1723,6 +2351,237 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(!workspace.add_modifier.contains(Modifier::BOLD));
         assert_eq!(agent.fg, Some(app.palette.overlay0));
         assert!(!agent.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// A worktree child is named after its own branch, so an agent hanging under it
+    /// would otherwise print that branch directly beneath the identical space name.
+    /// A top-level space keeps its own name, so its agents still carry the branch.
+    #[test]
+    fn worktree_child_agents_drop_a_branch_that_repeats_the_space_name() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("herdr", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("feat-x", Some("repo-key"), "/repo/herdr-feat-x"),
+        ];
+        if let Some(space) = app.workspaces[1].worktree_space.as_mut() {
+            space.is_linked_worktree = true;
+        }
+        app.workspaces[0].cached_git_branch = Some("main".into());
+        app.workspaces[1].cached_git_branch = Some("feat-x".into());
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for ws_idx in 0..2 {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+
+        let area = Rect::new(0, 0, 30, 20);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 110, 20));
+        let mut terminal = Terminal::new(TestBackend::new(30, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = &app.view.sidebar_agent_row_areas;
+
+        let parent_agent = row_text(buffer, rows[0].rect.y, 30);
+        assert!(parent_agent.contains("main"), "parent: {parent_agent:?}");
+        let child_agent = row_text(buffer, rows[1].rect.y, 30);
+        assert!(!child_agent.contains("feat-x"), "child: {child_agent:?}");
+        assert!(child_agent.contains("pi"), "child: {child_agent:?}");
+    }
+
+    /// The branch lives on the agent rows now, so the space row above them drops to
+    /// one line — and takes the branch back the moment those rows are hidden.
+    #[test]
+    fn space_row_drops_the_branch_line_while_agent_rows_carry_it() {
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.workspaces[0].cached_git_branch = Some("feature-x".into());
+        // ahead/behind keeps the space's second row alive after the branch is
+        // dropped, which is exactly when a stale suppression check shows up
+        app.workspaces[0].cached_git_ahead_behind = Some((1, 0));
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let (cards, agent_rows) = compute_workspace_list_areas(&app, area);
+        assert_eq!(cards[0].rect.height, 1);
+        let agent_row = agent_rows[0].rect.y;
+        app.view.workspace_card_areas = cards;
+        app.view.sidebar_agent_row_areas = agent_rows;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = row_text(buffer, agent_row, 26);
+        assert!(rendered.contains("feature-x"), "rendered: {rendered:?}");
+        // the drawn space row has to agree with the height layout gave it, or the
+        // branch comes back on screen while the card is still one row tall
+        let space_row = row_text(buffer, app.view.workspace_card_areas[0].rect.y, 26);
+        assert!(!space_row.contains("feature-x"), "space row: {space_row:?}");
+        // the ahead count rides up rather than holding a line open by itself
+        assert!(space_row.contains("↑1"), "space row: {space_row:?}");
+
+        // with no agent under it there is nowhere else for the branch to live
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = None;
+        let (bare_cards, _) = compute_workspace_list_areas(&app, area);
+        assert_eq!(bare_cards[0].rect.height, 2);
+    }
+
+    /// An ordinal reads as "which one", and staying one cell wide is what keeps the
+    /// slot it hangs in narrow; past the range Unicode encloses it has to widen, and
+    /// the slot is sized from the highest number so no name shifts.
+    #[test]
+    fn space_ordinals_are_enclosed_while_unicode_still_encloses_them() {
+        for (number, expected) in [(1, "①"), (9, "⑨"), (20, "⑳")] {
+            let label = space_number_label(number);
+            assert_eq!(label, expected);
+            assert_eq!(unicode_width::UnicodeWidthStr::width(label.as_str()), 1);
+        }
+        assert_eq!(space_number_label(21), "21");
+        // never truncated: a wrong number is worse than a wider column
+        assert_eq!(space_number_label(120), "120");
+    }
+
+    /// A space with nothing running still reads as one block: its branch line hangs
+    /// under the name in the column an agent row would have used for its indicator.
+    #[test]
+    fn a_space_without_agents_keeps_the_indicator_column_on_its_branch_row() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.workspaces[0].cached_git_branch = Some("feature-x".into());
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let (cards, agent_rows) = compute_workspace_list_areas(&app, area);
+        assert!(agent_rows.is_empty(), "no agent should be detected here");
+        app.view.workspace_card_areas = cards;
+        let card = app.view.workspace_card_areas[0].rect;
+        assert_eq!(card.height, 2);
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let branch_row = row_text(buffer, card.y + 1, 26);
+
+        assert!(branch_row.starts_with(" │ feature-x"), "{branch_row:?}");
+        // the same tier the rules and an idle agent use: nothing here wants you
+        assert_eq!(
+            buffer[(card.x + 1, card.y + 1)].style().fg,
+            Some(app.palette.surface1)
+        );
+    }
+
+    /// The space dot is a fallback, not a duplicate: it aggregates its agents only
+    /// while their own rows are hidden, and goes neutral once they are on screen.
+    #[test]
+    fn space_state_dot_defers_to_visible_agent_rows() {
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Pi);
+        terminal.state = AgentState::Working;
+
+        let area = Rect::new(0, 0, 26, 20);
+        // the dot keeps the near column; the ordinal rides the far edge
+        let expanded = space_row_text(&mut app, area);
+        assert!(expanded.starts_with(" – one"), "expanded: {expanded:?}");
+        assert!(expanded.contains('\u{2460}'), "expanded: {expanded:?}");
+
+        // with its agent row gone the space has to speak for it again
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = None;
+        let bare = space_row_text(&mut app, area);
+        assert!(bare.contains('●'), "bare: {bare:?}");
+    }
+
+    fn space_row_text(app: &mut AppState, area: Rect) -> String {
+        let (card_areas, agent_row_areas) = compute_workspace_list_areas(app, area);
+        app.view.workspace_card_areas = card_areas;
+        app.view.sidebar_agent_row_areas = agent_row_areas;
+        let row = app.view.workspace_card_areas[0].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let first = row_text(buffer, body.y, 25);
+        let second = row_text(buffer, body.y + 1, 25);
+        assert!(first.contains("one"));
+        assert_eq!(second, "   pi");
+        assert!(!first.contains("working"));
+        assert!(!second.contains("working"));
+
+        let workspace_x = find_symbol_x(buffer, body.y, body.width, "o");
+        let workspace_style = buffer[(workspace_x, body.y)].style();
+        assert_eq!(workspace_style.fg, Some(app.palette.text));
+        assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(workspace_style.bg, Some(app.palette.active_row_bg));
+
+        let agent_x = find_symbol_x(buffer, body.y + 1, body.width, "p");
+        let agent_style = buffer[(agent_x, body.y + 1)].style();
+        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
+        assert!(agent_style.add_modifier.contains(Modifier::DIM));
+        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(agent_style.bg, Some(app.palette.active_row_bg));
+        row_text(terminal.backend().buffer(), row, area.width)
+    }
+
+    /// Exactly one filled row on screen: once the focused agent has its own row in
+    /// the tree, the space row above it must stay unfilled or the same place is
+    /// marked twice. The space row only takes the fill back when that row is gone.
+    #[test]
+    fn active_space_row_yields_its_fill_to_the_focused_agent_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let (card_areas, agent_row_areas) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = card_areas;
+        app.view.sidebar_agent_row_areas = agent_row_areas;
+        let space_row = app.view.workspace_card_areas[0].rect.y;
+        let agent_row = app.view.sidebar_agent_row_areas[0].rect.y;
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let space = buffer[(find_symbol_x(buffer, space_row, 25, "o"), space_row)].style();
+        assert_eq!(space.bg, Some(ratatui::style::Color::Reset));
+        let agent = buffer[(find_symbol_x(buffer, agent_row, 25, "p"), agent_row)].style();
+        assert_eq!(agent.bg, Some(app.palette.surface_dim));
     }
 
     #[test]
@@ -1741,6 +2600,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .unwrap();
         let buffer = terminal.backend().buffer();
 
+        // spaces take the brightest tier; only weight separates active
         let active = buffer[(find_symbol_x(buffer, first_row, 25, "o"), first_row)].style();
         assert_eq!(active.fg, Some(app.palette.text));
         assert!(active.add_modifier.contains(Modifier::BOLD));
@@ -1748,7 +2608,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.bg, Some(app.palette.active_row_bg));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
-        assert_eq!(inactive.fg, Some(app.palette.subtext0));
+        assert_eq!(inactive.fg, Some(app.palette.text));
         assert!(!inactive
             .add_modifier
             .intersects(Modifier::BOLD | Modifier::DIM));
@@ -1845,10 +2705,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 style: config.ui.sidebar.spaces.rows[0][0].parts().1,
             }],
             ("", Style::default()),
-            Style::default(),
-            Style::default(),
-            Style::default(),
-            Style::default(),
+            RowStyles {
+                state_text: Style::default(),
+                workspace: Style::default(),
+                agent: Style::default(),
+                branch: Style::default(),
+                secondary: Style::default(),
+                custom: Style::default(),
+            },
             &crate::app::state::AppState::test_new().palette,
             20,
         );
@@ -1880,10 +2744,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         assert_eq!(app.sidebar_agents.row_gap, 0);
 
-        let area = Rect::new(0, 0, 20, 5);
+        // 3 header rows + 2 agent rows + the shared footer row
+        let area = Rect::new(0, 0, 20, 6);
         let metrics = agent_panel_scroll_metrics(&app, area);
         let body = agent_panel_body_rect(area, false);
-        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
         terminal
             .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
@@ -1892,7 +2757,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(metrics.viewport_rows, 2);
         assert_eq!(metrics.max_offset_from_bottom, 0);
         assert_eq!(row_text(buffer, body.y, body.width), " pi");
-        assert_eq!(row_text(buffer, body.y + 1, body.width), " claude");
+        // claude is shortened to its initials on a row
+        assert_eq!(row_text(buffer, body.y + 1, body.width), " cc");
     }
 
     #[test]
@@ -1908,13 +2774,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .clone();
         app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
 
+        app.sidebar_view = crate::app::state::SidebarView::Agents;
+
         let area = Rect::new(0, 0, 18, 20);
         let mut terminal = Terminal::new(TestBackend::new(18, 20)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let agent_area = sidebar_content_rect(area);
         let body = agent_panel_body_rect(agent_area, false);
         let first = row_text(buffer, body.y, 17);
 
@@ -1939,12 +2807,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::config::AgentSidebarToken::TerminalTitleStripped,
         ]];
 
+        app.sidebar_view = crate::app::state::SidebarView::Agents;
+
         let area = Rect::new(0, 0, 10, 12);
         let mut renderer = Terminal::new(TestBackend::new(10, 12)).unwrap();
         renderer
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let agent_area = sidebar_content_rect(area);
         let body = agent_panel_body_rect(agent_area, false);
         let rendered = row_text(renderer.backend().buffer(), body.y, 9);
 
@@ -1956,10 +2826,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "修复🙂标题很长".into(),
             ))],
             ("", Style::default()),
-            Style::default(),
-            Style::default(),
-            Style::default(),
-            Style::default(),
+            RowStyles {
+                state_text: Style::default(),
+                workspace: Style::default(),
+                agent: Style::default(),
+                branch: Style::default(),
+                secondary: Style::default(),
+                custom: Style::default(),
+            },
             &app.palette,
             8,
         );
@@ -2019,8 +2893,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]; 6];
-        let area = Rect::new(0, 0, 20, 10);
-        let workspace_area = workspace_list_rect(area, app.sidebar_section_split);
+        // body is 5 rows, so the 6-row space row must be clipped to it
+        let area = Rect::new(0, 0, 20, 8);
+        let workspace_area = workspace_list_rect(area);
         let body = workspace_list_body_rect(workspace_area, false);
 
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
@@ -2373,7 +3248,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(detail_area.x, tenth_row)].symbol(), "1");
         assert_eq!(buffer[(detail_area.x + 1, tenth_row)].symbol(), "0");
-        assert_eq!(buffer[(detail_area.x + 2, tenth_row)].symbol(), "·");
+        assert_eq!(buffer[(detail_area.x + 2, tenth_row)].symbol(), "–");
     }
 
     #[test]
@@ -2532,18 +3407,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+    fn both_views_fill_the_sidebar_content_rect() {
+        let area = Rect::new(0, 0, 20, 5);
 
-        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
-        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+        assert_eq!(sidebar_content_rect(area), Rect::new(0, 0, 19, 5));
+        assert_eq!(workspace_list_rect(area), Rect::new(0, 0, 19, 5));
+        assert_eq!(sidebar_content_rect(Rect::new(0, 0, 1, 5)), Rect::default());
     }
 
     #[test]
-    fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+    fn view_tabs_sit_on_the_first_content_row() {
 
-        assert_eq!(divider, Rect::default());
+    }
+
+    #[test]
+        assert_eq!(spaces, Rect::new(0, 0, 7, 1));
+        assert_eq!(agents, Rect::new(10, 0, 6, 1));
+
     }
 
     #[test]
@@ -2633,7 +3513,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 0;
         let area = Rect::new(0, 0, 30, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area = workspace_list_rect(area);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -2653,11 +3533,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let parent_name_x = find_symbol_x(buffer, cards[0].rect.y, cards[0].rect.width, "m");
         let plain_name_x = find_symbol_x(buffer, cards[3].rect.y, cards[3].rect.width, "n");
         assert_eq!(parent_name_x, plain_name_x);
-        assert_eq!(buffer[(cards[1].rect.x + 3, cards[1].rect.y)].symbol(), "├");
-        assert_eq!(buffer[(cards[2].rect.x + 3, cards[2].rect.y)].symbol(), "└");
+        assert_eq!(buffer[(cards[1].rect.x + 1, cards[1].rect.y)].symbol(), "├");
+        assert_eq!(buffer[(cards[2].rect.x + 1, cards[2].rect.y)].symbol(), "└");
+        // no chevron: the name owns the row all the way to its right edge
         assert_eq!(
             buffer[(cards[0].rect.x + cards[0].rect.width - 1, cards[0].rect.y)].symbol(),
-            "▾"
+            " "
         );
     }
 
@@ -2671,10 +3552,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         app.sidebar_spaces.row_gap = 0;
-        let area = Rect::new(0, 0, 30, 10);
+        // 2 header rows + 2 visible space rows + the footer row, so the third
+        // space is clipped and the connector must come from the full entry list
+        let area = Rect::new(0, 0, 30, 5);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         assert_eq!(app.view.workspace_card_areas.len(), 2);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area = workspace_list_rect(area);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -2691,7 +3574,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let child = app.view.workspace_card_areas[1];
         assert_eq!(
-            terminal.backend().buffer()[(child.rect.x + 3, child.rect.y)].symbol(),
+            terminal.backend().buffer()[(child.rect.x + 1, child.rect.y)].symbol(),
             "├"
         );
     }
@@ -2712,6 +3595,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!cards[0].indented);
         assert_eq!(cards[1].ws_idx, 1);
         assert!(cards[1].indented);
+        // the group is one block, so no gap opens between parent and first child
         assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height);
     }
 
@@ -2728,6 +3612,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 2;
 
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
+        // parent and both children are one block: gaps only land after it
         assert_eq!(
             spacious[1].rect.y,
             spacious[0].rect.y + spacious[0].rect.height
@@ -2766,7 +3651,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 0;
         let area = Rect::new(0, 0, 30, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area = workspace_list_rect(area);
         let indicator_row = workspace_drop_indicator_row(
             &app,
             &app.view.workspace_card_areas,
@@ -3012,6 +3897,278 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             ]
         );
+    }
+
+    #[test]
+    fn worktree_group_keeps_its_connectors_while_agent_rows_sit_flush_left() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("c1", Some("repo-key"), "/repo/herdr-c1"),
+            workspace_with_worktree_space("c2", Some("repo-key"), "/repo/herdr-c2"),
+        ];
+        for idx in 1..3 {
+            if let Some(space) = app.workspaces[idx].worktree_space.as_mut() {
+                space.is_linked_worktree = true;
+            }
+        }
+        app.sidebar_spaces.rows = vec![vec![
+            crate::config::SpaceSidebarToken::StateIcon,
+            crate::config::SpaceSidebarToken::Workspace,
+        ]];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for ws_idx in 0..3 {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+
+        let area = Rect::new(0, 0, 26, 20);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 106, 20));
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (2..10)
+            .map(|row| row_text(buffer, row, 26))
+            .collect::<Vec<_>>();
+
+        // space rows keep the group connectors, because a chevron sits on the parent
+        // and on its worktree children alike and so cannot tell them apart
+        assert!(rows[0].starts_with(" – main"), "rows: {rows:#?}");
+        assert!(rows[3].starts_with(" ├─ – c1"), "rows: {rows:#?}");
+        assert!(rows[6].starts_with(" └─ – c2"), "rows: {rows:#?}");
+        // agent rows carry neither, so every one of them starts in the same column
+        for row in [&rows[1], &rows[4], &rows[7]] {
+            assert!(row.starts_with(" ┃ pi"), "rows: {rows:#?}");
+        }
+    }
+
+    #[test]
+    fn expanded_space_emits_its_agent_rows_under_the_space_row() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_tab = workspace.test_add_tab(Some("logs"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for (tab_idx, pane_id) in [(0, first_pane), (second_tab, second_pane)] {
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+
+        assert_eq!(
+            sidebar_tree_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::AgentPane {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: first_pane,
+                    under_indented: false,
+                },
+                WorkspaceListEntry::AgentPane {
+                    ws_idx: 0,
+                    tab_idx: second_tab,
+                    pane_id: second_pane,
+                    under_indented: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_agent_rows_print_the_space_name_once() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_tab = workspace.test_add_tab(Some("logs"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for (tab_idx, pane_id) in [(0, first_pane), (second_tab, second_pane)] {
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+
+        let area = Rect::new(0, 0, 26, 20);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 106, 20));
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..20)
+            .map(|row| row_text(buffer, row, 25))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(rendered.matches("one").count(), 1, "rendered:\n{rendered}");
+        assert_eq!(rendered.matches("pi").count(), 2, "rendered:\n{rendered}");
+        // agent rows hang on indentation alone; the chevron is what marks a space row
+        assert!(!rendered.contains("├"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("└"), "rendered:\n{rendered}");
+    }
+
+    /// One space, one tab, two panes running the same agent — the default
+    /// template renders both rows identically without a discriminator.
+    fn app_with_colliding_sibling_agents(
+    ) -> (AppState, crate::layout::PaneId, crate::layout::PaneId) {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first = workspace.tabs[0].root_pane;
+        let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for pane_id in [first, second] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+        (app, first, second)
+    }
+
+    fn rendered_sidebar(app: &mut AppState) -> String {
+        let area = Rect::new(0, 0, 26, 20);
+        crate::ui::compute_view(app, Rect::new(0, 0, 106, 20));
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..20)
+            .map(|row| row_text(buffer, row, 25))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Two rules, two weights: a space boundary separates unrelated work and has to
+    /// read as the stronger break, so the rule between agents stays under it.
+    #[test]
+    fn the_rule_between_spaces_outranks_the_rule_between_agents() {
+        let (mut app, _, _) = app_with_colliding_sibling_agents();
+        app.workspaces.push(Workspace::test_new("two"));
+        app.ensure_test_terminals();
+        app.sidebar_spaces.row_gap = 1;
+
+        let area = Rect::new(0, 0, 26, 24);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 106, 24));
+        let mut terminal = Terminal::new(TestBackend::new(26, 24)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let agent_rows = &app.view.sidebar_agent_row_areas;
+        let agent_rule = &buffer[(
+            agent_rows[0].rect.x,
+            agent_rows[0].rect.y + agent_rows[0].rect.height,
+        )];
+        assert_eq!(agent_rule.symbol(), "─");
+        assert_eq!(agent_rule.style().fg, Some(app.palette.surface1));
+        assert!(!agent_rule.style().add_modifier.contains(Modifier::DIM));
+
+        let second_card = app.view.workspace_card_areas[1];
+        let space_rule = &buffer[(second_card.rect.x, second_card.rect.y - 1)];
+        assert_eq!(space_rule.symbol(), "─");
+        assert_eq!(space_rule.style().fg, Some(app.palette.space_rule()));
+        // it only has to outrank the rule between agents; how far it goes toward the
+        // legible tier is a taste the constant carries
+        assert_ne!(app.palette.space_rule(), app.palette.surface1);
+    }
+
+    /// Flush-left agent rows have no indentation left to group them, so a rule
+    /// carries the boundary — one tier dimmer than the rule between spaces, which
+    /// separates unrelated work and so has to read as the stronger break.
+    #[test]
+    fn sibling_agent_rows_are_separated_by_a_dimmer_rule() {
+        let (mut app, _, _) = app_with_colliding_sibling_agents();
+
+        let area = Rect::new(0, 0, 26, 20);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 106, 20));
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = &app.view.sidebar_agent_row_areas;
+        let rule_y = rows[0].rect.y + rows[0].rect.height;
+
+        assert!(
+            rule_y < rows[1].rect.y,
+            "sibling rows left no gap for a rule"
+        );
+        let cell = &buffer[(rows[0].rect.x, rule_y)];
+        assert_eq!(cell.symbol(), "─");
+        assert_eq!(cell.style().fg, Some(app.palette.surface1));
+        assert_ne!(app.palette.surface1, app.palette.overlay0);
+    }
+
+    #[test]
+    fn identical_sibling_agent_rows_fall_back_to_ordinals() {
+        let (mut app, _, _) = app_with_colliding_sibling_agents();
+
+        let rendered = rendered_sidebar(&mut app);
+
+        // the branch now sits between the name and the discriminator, and its text
+        // depends on whatever branch the test checkout is on, so match the tail only
+        let rows = rendered
+            .lines()
+            .filter(|line| line.contains("pi"))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2, "rendered:\n{rendered}");
+        // the focused row keeps a selection rule in its last column, past the text
+        let tail = |row: &str| row.trim_end().trim_end_matches('┃').trim_end().to_string();
+        assert!(tail(rows[0]).ends_with("· 1"), "rendered:\n{rendered}");
+        assert!(tail(rows[1]).ends_with("· 2"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn identical_sibling_agent_rows_prefer_pane_labels_over_ordinals() {
+        let (mut app, first, second) = app_with_colliding_sibling_agents();
+        for (pane_id, label) in [(first, "api"), (second, "ui")] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().manual_label = Some(label.into());
+        }
+
+        let rendered = rendered_sidebar(&mut app);
+
+        assert!(rendered.contains("api"), "rendered:\n{rendered}");
+        assert!(rendered.contains("ui"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("pi · 1"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn distinguishable_sibling_agent_rows_get_no_discriminator() {
+        let (mut app, first, _) = app_with_colliding_sibling_agents();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&first]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+
+        let rendered = rendered_sidebar(&mut app);
+
+        assert!(rendered.contains("cc"), "rendered:\n{rendered}");
+        assert!(rendered.contains("pi"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("pi · 1"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("cc · 1"), "rendered:\n{rendered}");
     }
 
     #[test]

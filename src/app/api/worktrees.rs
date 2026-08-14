@@ -119,7 +119,7 @@ impl App {
             }
             (ws_idx, created_source_workspace)
         } else {
-            match self.create_workspace_with_options(entry.path.clone(), params.focus) {
+            match self.create_workspace_via_api(entry.path.clone(), params.focus) {
                 Ok(ws_idx) => (ws_idx, true),
                 Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
             }
@@ -388,7 +388,7 @@ impl App {
         let mut created_parent = false;
         if source.workspace_idx.is_none() {
             let ws_idx = self
-                .create_workspace_with_options(source.source_checkout_path.clone(), false)
+                .create_workspace_via_api(source.source_checkout_path.clone(), false)
                 .map_err(|err| ApiFailure::new("worktree_open_failed", err.to_string()))?;
             source.workspace_idx = Some(ws_idx);
             created_parent = true;

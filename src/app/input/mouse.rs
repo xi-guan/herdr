@@ -431,13 +431,6 @@ impl AppState {
                     return None;
                 }
 
-                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
-                    self.drag = Some(DragState {
-                        target: DragTarget::SidebarSectionDivider,
-                    });
-                    self.set_sidebar_section_split(mouse.row);
-                    return None;
-                }
 
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
@@ -541,6 +534,14 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some(view) = self.sidebar_view_tab_at(mouse.column, mouse.row) {
+                        if self.sidebar_view != view {
+                            self.sidebar_view = view;
+                            self.mark_session_dirty();
+                        }
+                        return None;
+                    }
+
                     let new_button = self.sidebar_new_button_rect();
                     let on_new_button = mouse.row >= new_button.y
                         && mouse.row < new_button.y + new_button.height
@@ -566,26 +567,10 @@ impl AppState {
                         return None;
                     }
 
-                    let cards = if self.view.workspace_card_areas.is_empty() {
-                        crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
-                    } else {
-                        self.view.workspace_card_areas.clone()
-                    };
-                    if let Some(card) = cards.iter().find(|card| {
-                        let chevron = crate::ui::workspace_group_chevron_rect(card);
-                        mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
-                    }) {
-                        if let Some((key, collapsed)) =
-                            crate::ui::workspace_parent_group_state(self, card.ws_idx)
-                        {
-                            if collapsed {
-                                self.collapsed_space_keys.remove(&key);
-                            } else {
-                                self.collapsed_space_keys.insert(key);
-                            }
-                            self.mark_session_dirty();
-                            return None;
-                        }
+                    if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_agent_row_at(mouse.row)
+                    {
+                        self.mode = Mode::Terminal;
+                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
 
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -818,9 +803,6 @@ impl AppState {
                         }
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
-                        }
-                        DragTarget::SidebarSectionDivider => {
-                            self.set_sidebar_section_split(mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }

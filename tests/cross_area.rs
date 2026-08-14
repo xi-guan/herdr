@@ -557,6 +557,21 @@ fn frame_contains_colored_symbol(frame: &FrameWire, symbol: &str, rgb: (u8, u8, 
         .any(|cell| cell.symbol == symbol && cell.fg == fg)
 }
 
+/// A working agent's indicator turns, so its glyph changes every frame. What holds
+/// is the colour and the block it is drawn from: braille, U+2800..U+28FF.
+fn frame_contains_working_indicator(frame: &FrameWire, rgb: (u8, u8, u8)) -> bool {
+    let (r, g, b) = rgb;
+    let fg = 0x02_00_00_00 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    frame.cells.iter().any(|cell| {
+        cell.fg == fg
+            && cell
+                .symbol
+                .chars()
+                .next()
+                .is_some_and(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+    })
+}
+
 fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
     if frame.cells.is_empty() {
         return false;
@@ -845,7 +860,8 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     client_handshake(&mut client_b, CURRENT_PROTOCOL, 80, 24);
     let saw_working_on_client =
         wait_for_frame_matching(&mut client_b, Duration::from_secs(5), |frame| {
-            frame_contains_colored_symbol(frame, "●", (249, 226, 175))
+            // working shares the tier the agents themselves use for it, not the warning one
+            frame_contains_working_indicator(frame, (250, 179, 135))
         })
         .expect("frame decoding should succeed");
     assert!(
@@ -864,7 +880,8 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
 
     let saw_blocked_on_client =
         wait_for_frame_matching(&mut client_b, Duration::from_secs(5), |frame| {
-            frame_contains_colored_symbol(frame, "●", (243, 139, 168))
+            // a settled agent draws a line down its two-row column
+            frame_contains_colored_symbol(frame, "┃", (243, 139, 168))
         })
         .expect("frame decoding should succeed");
     assert!(
@@ -906,7 +923,9 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
     // label, proving client-side state reflects the API surface.
     let saw_workspace_on_client =
         wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
-            frame_contains_text(frame, "api-visible-workspace")
+            // the sidebar keeps a column for the space's number, so a long label
+            // arrives truncated; what matters here is that it arrives at all
+            frame_contains_text(frame, "api-visible-work")
         })
         .expect("frame decoding should succeed");
     assert!(

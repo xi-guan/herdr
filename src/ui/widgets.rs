@@ -29,10 +29,11 @@ pub(super) fn render_panel_shell(
     Some(inner)
 }
 
+/// Text colour for content painted on top of an accent fill. Whichever of black or
+/// white reads better on that accent wins, because punching the panel colour out of
+/// the fill only works when the two happen to differ — on a dark accent with a dark
+/// panel it produces text that is technically drawn and practically invisible.
 pub(super) fn panel_contrast_fg(p: &Palette) -> Color {
-    match p.panel_bg {
-        Color::Reset => p.surface_dim,
-        color => color,
     }
 }
 

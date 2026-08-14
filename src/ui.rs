@@ -79,10 +79,8 @@ pub(crate) use self::{
         agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
         agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
         agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
+        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, compute_workspace_list_areas,
+        workspace_list_entries_expanded, workspace_list_scroll_metrics,
         workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
         WorkspaceListEntry,
     },
@@ -101,6 +99,7 @@ pub(crate) use self::{
 };
 use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
+use crate::layout::PaneArea;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
@@ -166,7 +165,13 @@ fn resize_background_tab_panes_to_area(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_surface(app, terminal_runtimes, tab, terminal_area, cell_size);
+            resize_tab_surface(
+                app,
+                terminal_runtimes,
+                tab,
+                PaneArea::Whole(terminal_area),
+                cell_size,
+            );
         }
     }
 }
@@ -183,9 +188,55 @@ fn resize_background_tab_panes_for_desktop(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_surface(app, terminal_runtimes, tab, terminal_area, cell_size);
+            // each background tab decides its own gutter: the shape that earns one is
+            // per tab, and sizing a terminal to a gutter it never gets is a wrong size
+            let pane_area = tab_pane_area(app, tab, terminal_area);
+            resize_tab_surface(app, terminal_runtimes, tab, pane_area, cell_size);
         }
     }
+}
+
+fn desktop_sidebar_width(app: &AppState) -> u16 {
+    if app.sidebar_collapsed {
+        match app.sidebar_collapsed_mode {
+            crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
+            crate::config::SidebarCollapsedModeConfig::Hidden => 0,
+        }
+    } else {
+        app.sidebar_width
+            .clamp(app.sidebar_min_width, app.sidebar_max_width)
+    }
+}
+
+/// The (left, sidebar, right) columns a centered sidebar would take in `terminal_area`,
+/// or `None` when this tab cannot give one up and the sidebar stays at the edge.
+fn centered_gutter_for_tab(
+    app: &AppState,
+    tab: &crate::workspace::Tab,
+    terminal_area: Rect,
+) -> Option<(Rect, Rect, Rect)> {
+    let sidebar_w = desktop_sidebar_width(app);
+    if app.sidebar_position != crate::config::SidebarPositionConfig::Center
+        || app.sidebar_collapsed
+        || sidebar_w == 0
+        // a zoomed tab is showing one pane, so there is no seam left to sit on
+        || tab.zoomed
+    {
+        return None;
+    }
+    tab.layout.gutter_areas(terminal_area, sidebar_w)
+}
+
+/// Where a tab's panes tile inside `terminal_area`, for callers outside the view
+/// pass that need pane geometry for a tab they are not currently laying out.
+pub(crate) fn tab_pane_area(
+    app: &AppState,
+    tab: &crate::workspace::Tab,
+    terminal_area: Rect,
+) -> PaneArea {
+    centered_gutter_for_tab(app, tab, terminal_area)
+        .map(|(left, _, right)| PaneArea::Gutter { left, right })
+        .unwrap_or(PaneArea::Whole(terminal_area))
 }
 
 fn desktop_tab_bar_and_terminal_area(
@@ -194,21 +245,29 @@ fn desktop_tab_bar_and_terminal_area(
     main_area: Rect,
 ) -> (Rect, Rect) {
     let hide_single_tab_bar = app.hide_tab_bar_when_single_tab && ws.tabs.len() == 1;
-    if !hide_single_tab_bar && main_area.height > 1 {
-        match app.tab_bar_position {
-            crate::config::TabBarPositionConfig::Top => {
-                let [tab_bar_rect, terminal_area] =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-                (tab_bar_rect, terminal_area)
-            }
-            crate::config::TabBarPositionConfig::Bottom => {
-                let [terminal_area, tab_bar_rect] =
-                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main_area);
-                (tab_bar_rect, terminal_area)
-            }
+    if hide_single_tab_bar || main_area.height <= 1 {
+        return (Rect::default(), main_area);
+    }
+    // the bar sits where the eye already is when switching: at the bottom it is next
+    // to the prompt, at the top it is next to the tab titles' own headings
+    match app.tab_bar_position {
+        crate::config::TabBarPositionConfig::Top => {
+            let [tab_bar_rect, terminal_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
+            (tab_bar_rect, terminal_area)
         }
-    } else {
-        (Rect::default(), main_area)
+        crate::config::TabBarPositionConfig::Bottom => {
+            let [terminal_area, row] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main_area);
+            // at the bottom the bar shares its row with the sidebar's own footer, so
+            // it starts a column in rather than butting straight against it
+            let tab_bar_rect = Rect {
+                x: row.x.saturating_add(1),
+                width: row.width.saturating_sub(1),
+                ..row
+            };
+            (tab_bar_rect, terminal_area)
+        }
     }
 }
 
@@ -224,30 +283,51 @@ fn compute_view_internal(
         return;
     }
 
-    let sidebar_w = if app.sidebar_collapsed {
-        match app.sidebar_collapsed_mode {
-            crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
-            crate::config::SidebarCollapsedModeConfig::Hidden => 0,
-        }
-    } else {
-        app.sidebar_width
-            .clamp(app.sidebar_min_width, app.sidebar_max_width)
-    };
+    let sidebar_w = desktop_sidebar_width(app);
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+    let active_ws = app.active.and_then(|i| app.workspaces.get(i));
 
-    let (tab_bar_rect, terminal_area) = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
-        .unwrap_or((Rect::default(), main_area));
+    // the centered sidebar is tried first because it wants the full width: only the
+    // visible tab's shape can say whether the seam it needs to sit on exists at all
+    let centered = active_ws.and_then(|ws| {
+        let (tab_bar_rect, terminal_area) = desktop_tab_bar_and_terminal_area(app, ws, area);
+        let (left, sidebar_area, right) =
+            centered_gutter_for_tab(app, ws.active_tab()?, terminal_area)?;
+        Some((
+            sidebar_area,
+            area,
+            tab_bar_rect,
+            terminal_area,
+            PaneArea::Gutter { left, right },
+        ))
+    });
+
+    let (sidebar_area, main_area, tab_bar_rect, terminal_area, pane_area) = centered
+        .unwrap_or_else(|| {
+            let [sidebar_area, main_area] =
+                Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+            let (tab_bar_rect, terminal_area) = active_ws
+                .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
+                .unwrap_or((Rect::default(), main_area));
+            (
+                sidebar_area,
+                main_area,
+                tab_bar_rect,
+                terminal_area,
+                PaneArea::Whole(terminal_area),
+            )
+        });
 
     if !app.sidebar_collapsed {
-        app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        // only the visible view's scroll needs clamping; the other one is not laid out
+        if app.sidebar_view == crate::app::state::SidebarView::Spaces {
+            app.workspace_scroll =
+                normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
+        } else {
+            let content = sidebar_content_rect(sidebar_area);
+            let max_agent_scroll = agent_panel_scroll_metrics(app, content).max_offset_from_bottom;
+            app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        }
     } else {
         app.workspace_scroll = app
             .workspace_scroll
@@ -255,10 +335,10 @@ fn compute_view_internal(
         app.agent_panel_scroll = 0;
     }
 
-    let workspace_card_areas = if app.sidebar_collapsed {
-        Vec::new()
+    let (workspace_card_areas, sidebar_agent_row_areas) = if app.sidebar_collapsed {
+        (Vec::new(), Vec::new())
     } else {
-        compute_workspace_card_areas(app, sidebar_area)
+        compute_workspace_list_areas(app, sidebar_area)
     };
 
     let tab_bar_view = app
@@ -279,13 +359,7 @@ fn compute_view_internal(
     let TabSurfaceLayout {
         pane_infos,
         split_borders,
-    } = compute_tab_surface(
-        app,
-        terminal_runtimes,
-        terminal_area,
-        resize_panes,
-        cell_size,
-    );
+    } = compute_tab_surface(app, terminal_runtimes, pane_area, resize_panes, cell_size);
     if resize_panes {
         resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
@@ -308,6 +382,7 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        sidebar_agent_row_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -351,7 +426,7 @@ fn compute_mobile_view(
     } = compute_tab_surface(
         app,
         terminal_runtimes,
-        terminal_area,
+        PaneArea::Whole(terminal_area),
         resize_panes,
         cell_size,
     );
@@ -371,6 +446,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        sidebar_agent_row_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -811,10 +887,41 @@ mod tests {
         assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
     }
 
+    /// Switching tabs means looking at the bar, and at the bottom it sits next to
+    /// the prompt the eye is already on. The terminal keeps every row either way.
+    #[test]
+    fn the_tab_bar_can_sit_under_the_panes_instead_of_over_them() {
+        let mut app = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("one");
+        ws.test_add_tab(Some("second"));
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        let area = Rect::new(0, 0, 80, 24);
+
+        compute_view(&mut app, area);
+        let top = app.view.tab_bar_rect;
+
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
+        compute_view(&mut app, area);
+        let bottom = app.view.tab_bar_rect;
+
+        assert_eq!(top.height, 1);
+        assert_eq!(bottom.height, 1);
+        assert!(bottom.y > top.y, "top: {top:?} bottom: {bottom:?}");
+        assert_eq!(bottom.y + bottom.height, area.y + area.height);
+        // a column of air where the bar would otherwise butt against the sidebar's
+        // own footer, which shares this row once the bar moves down
+        assert_eq!(bottom.x, top.x + 1);
+        assert_eq!(bottom.width, top.width - 1);
+    }
+
     #[test]
     fn desktop_tab_bar_position_controls_geometry_and_mode_bar_placement() {
         let mut app = crate::app::state::AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one")];
+        // a named tab, because a lone auto-named one draws no chip to place
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("one".into());
+        app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
         app.mode = Mode::Prefix;
@@ -826,7 +933,9 @@ mod tests {
         app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.terminal_area, Rect::new(26, 0, 54, 19));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 54, 1));
+        // a column narrower than the top bar: at the bottom it shares its row with the
+        // sidebar's footer, and starts a column in rather than butting against it
+        assert_eq!(app.view.tab_bar_rect, Rect::new(27, 19, 53, 1));
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.y == 19));
         assert_eq!(app.view.new_tab_hit_area.y, 19);
 
@@ -1030,6 +1139,58 @@ mod tests {
         assert_eq!(app.view.sidebar_rect.width, 22);
     }
 
+    fn split_workspace_app(position: crate::config::SidebarPositionConfig) -> AppState {
+        let mut workspace = Workspace::test_new("one");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+        app.sidebar_position = position;
+        app
+    }
+
+    #[test]
+    fn centered_sidebar_sits_between_the_two_columns() {
+        let mut app = split_workspace_app(crate::config::SidebarPositionConfig::Center);
+
+        compute_view(&mut app, Rect::new(0, 0, 106, 20));
+
+        // full width, because the sidebar no longer eats into one edge of it
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 0, 106, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 106, 19));
+        assert_eq!(app.view.sidebar_rect, Rect::new(40, 1, 26, 19));
+
+        let mut panes: Vec<_> = app.view.pane_infos.iter().map(|info| info.rect).collect();
+        panes.sort_by_key(|rect| rect.x);
+        assert_eq!(panes[0], Rect::new(0, 1, 40, 19));
+        assert_eq!(panes[1], Rect::new(66, 1, 40, 19));
+    }
+
+    #[test]
+    fn centered_sidebar_falls_back_to_the_edge_without_two_columns() {
+        let mut app = split_workspace_app(crate::config::SidebarPositionConfig::Center);
+        app.workspaces[0].tabs[0].zoomed = true;
+        app.workspaces[0].zoomed = true;
+
+        compute_view(&mut app, Rect::new(0, 0, 106, 20));
+
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
+    }
+
+    #[test]
+    fn left_sidebar_is_untouched_by_the_centered_option() {
+        let mut app = split_workspace_app(crate::config::SidebarPositionConfig::Left);
+
+        compute_view(&mut app, Rect::new(0, 0, 106, 20));
+
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
+    }
+
     #[test]
     fn hidden_collapsed_sidebar_uses_full_width_terminal_area() {
         let mut app = crate::app::state::AppState::test_new();
@@ -1076,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+    fn expanded_sidebar_workspace_rows_lead_with_their_state() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1104,15 +1265,18 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
-        assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        // the dot leads the row; the ordinal rides the far edge
+        assert!(line1.starts_with(" – one"), "line1: {line1:?}");
+        assert!(line1.contains('\u{2460}'), "line1: {line1:?}");
+        // the branch hangs under the name, in the column an agent row would have
+        // used for its indicator; the far column holds this space's selection rule
+        assert_eq!(line2.trim_end().trim_end_matches('┃').trim_end(), " │ main");
 
         std::fs::remove_dir_all(repo).ok();
     }
 
     #[test]
-    fn tab_bar_dims_auto_named_tabs_and_emphasizes_custom_tabs() {
+    fn tab_bar_recedes_auto_named_tabs_and_emphasizes_custom_tabs() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let custom_tab = ws.test_add_tab(Some("logs"));
@@ -1135,14 +1299,22 @@ mod tests {
         let auto_style = buffer[(auto_rect.x + 1, auto_rect.y)].style();
         let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
 
-        assert_eq!(auto_style.fg, Some(app.palette.overlay0));
-        assert!(auto_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(custom_style.fg, Some(app.palette.panel_bg));
+        // the receding tier is carried by colour alone: DIM on top of it halved an
+        // already-muted tier into something you could not find on the bar
+        assert!(!auto_style.add_modifier.contains(Modifier::DIM));
+        assert_ne!(auto_style.bg, custom_style.bg);
+        assert_ne!(auto_style.bg, Some(app.palette.panel_bg));
+        // whichever of black or white reads on the accent, not the panel colour:
+        // punching the panel out of the fill fails whenever the two are close
+        assert_eq!(
+            custom_style.fg,
+            Some(crate::ui::widgets::panel_contrast_fg(&app.palette))
+        );
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn tab_bar_uses_surface_dim_when_panel_background_resets() {
+    fn tab_bar_punches_black_text_out_of_the_accent_when_panel_background_resets() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let custom_tab = ws.test_add_tab(Some("logs"));
@@ -1165,7 +1337,10 @@ mod tests {
         let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
 
         assert_eq!(custom_style.bg, Some(app.palette.accent));
-        assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
+        // surface_dim is a visible grey in Reset-background themes, so it used
+        // to render the active tab label as grey-on-accent and vanish
+        assert_ne!(custom_style.fg, Some(app.palette.surface_dim));
+        assert_eq!(custom_style.fg, Some(Color::Black));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
     }
 

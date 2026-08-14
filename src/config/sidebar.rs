@@ -7,6 +7,10 @@ use crate::detect::Agent;
 const MAX_SIDEBAR_ROWS: usize = 16;
 const MAX_SIDEBAR_TOKENS_PER_ROW: usize = 16;
 const DEFAULT_SIDEBAR_ROW_GAP: u16 = 0;
+/// Spaces get one row between blocks; the sidebar draws its separator rule there.
+/// Setting this to 0 packs the blocks and drops the rule with it. Agents inside a
+/// block stay packed either way — only spaces are far enough apart to need it.
+const DEFAULT_SPACE_ROW_GAP: u16 = 1;
 
 fn deserialize_sidebar_rows<'de, D, T>(deserializer: D) -> Result<Vec<Vec<T>>, D::Error>
 where
@@ -108,6 +112,8 @@ pub enum AgentSidebarToken {
     Tab,
     Pane,
     Agent,
+    /// Only resolves inside the tree, where the row knows which space it hangs under.
+    Branch,
     TerminalTitle,
     TerminalTitleStripped,
     Custom(String),
@@ -239,6 +245,7 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
         AgentSidebarToken::Pane => "pane".into(),
         AgentSidebarToken::Agent => "agent".into(),
         AgentSidebarToken::TerminalTitle => "terminal_title".into(),
+        AgentSidebarToken::Branch => "branch".into(),
         AgentSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
         AgentSidebarToken::Custom(name) => format!("${name}"),
         AgentSidebarToken::Styled { token, .. } => agent_token_name(token),
@@ -292,6 +299,7 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
                 ("tab", Self::Tab),
                 ("pane", Self::Pane),
                 ("agent", Self::Agent),
+                ("branch", Self::Branch),
                 ("terminal_title", Self::TerminalTitle),
                 ("terminal_title_stripped", Self::TerminalTitleStripped),
             ],
@@ -396,7 +404,11 @@ impl Default for AgentsSidebarConfig {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                // the branch rides here so the space row above can drop to one line
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::Branch],
+                // its own row rather than trailing the name: the title is the only
+                // token long enough that sharing a row truncates it to nothing
+                vec![AgentSidebarToken::TerminalTitleStripped],
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -419,7 +431,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
-            row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            row_gap: DEFAULT_SPACE_ROW_GAP,
         }
     }
 }
@@ -446,7 +458,8 @@ mod tests {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::Branch],
+                vec![AgentSidebarToken::TerminalTitleStripped],
             ]
         );
         assert!(config.agents.rows_by_agent.is_empty());
@@ -458,7 +471,8 @@ mod tests {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ]
         );
-        assert_eq!(config.spaces.row_gap, 0);
+        // one row between space blocks, where the separator is drawn
+        assert_eq!(config.spaces.row_gap, 1);
     }
 
     #[test]

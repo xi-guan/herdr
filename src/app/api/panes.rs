@@ -1709,9 +1709,11 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
+        // the same reservation the view makes, so reported rects are the ones on screen
+        let pane_area = crate::ui::tab_pane_area(&self.state, tab, area);
         let focused_pane_id = self.public_pane_id(ws_idx, tab.layout.focused())?;
         let panes = crate::ui::apply_pane_chrome(
-            tab.layout.panes(area),
+            tab.layout.panes_in(pane_area),
             self.state.pane_borders,
             self.state.pane_gaps,
             self.state.pane_outer_borders,
@@ -1727,7 +1729,7 @@ impl App {
         .collect();
         let splits = tab
             .layout
-            .splits(area)
+            .splits_in(pane_area)
             .into_iter()
             .enumerate()
             .map(|(idx, split)| PaneLayoutSplit {

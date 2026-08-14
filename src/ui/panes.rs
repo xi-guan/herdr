@@ -200,12 +200,13 @@ pub(super) fn resize_tab_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     tab: &crate::workspace::Tab,
-    area: Rect,
+    area: crate::layout::PaneArea,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     let multi_pane = tab.layout.pane_count() > 1;
 
     if tab.zoomed {
+        let area = area.bounds();
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
             let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
@@ -228,7 +229,7 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in apply_pane_chrome(
-        tab.layout.panes(area),
+        tab.layout.panes_in(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -253,7 +254,7 @@ pub(super) fn resize_tab_panes(
 pub(super) fn compute_pane_infos(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: crate::layout::PaneArea,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> Vec<PaneInfo> {
@@ -267,6 +268,7 @@ pub(super) fn compute_pane_infos(
     let multi_pane = ws.layout.pane_count() > 1;
 
     if ws.zoomed {
+        let area = area.bounds();
         let focused_id = ws.layout.focused();
         let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
             Borders::ALL
@@ -303,7 +305,7 @@ pub(super) fn compute_pane_infos(
     }
 
     let mut pane_infos = apply_pane_chrome(
-        ws.layout.panes(area),
+        ws.layout.panes_in(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -1329,7 +1331,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );
@@ -1363,7 +1365,7 @@ mod tests {
             let infos = compute_pane_infos(
                 &app,
                 &terminal_runtimes,
-                area,
+                crate::layout::PaneArea::Whole(area),
                 true,
                 crate::kitty_graphics::HostCellSize::default(),
             );
@@ -1403,7 +1405,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );
@@ -1432,7 +1434,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );
@@ -1461,7 +1463,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );
@@ -1494,7 +1496,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );
@@ -1508,7 +1510,7 @@ mod tests {
         let infos = compute_pane_infos(
             &app,
             &terminal_runtimes,
-            area,
+            crate::layout::PaneArea::Whole(area),
             false,
             crate::kitty_graphics::HostCellSize::default(),
         );

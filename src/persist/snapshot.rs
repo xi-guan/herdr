@@ -26,6 +26,17 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// True when the sidebar was last showing the agents view.
+    #[serde(default)]
+    pub sidebar_agents_view: bool,
+}
+
+/// Sidebar state carried through a session snapshot.
+pub struct SidebarSnapshotState {
+    pub width: u16,
+    pub section_split: f32,
+    pub collapsed_space_keys: std::collections::HashSet<String>,
+    pub agents_view: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,6 +195,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    sidebar_agents_view: bool,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -199,6 +212,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        sidebar_agents_view: raw.sidebar_agents_view,
     })
 }
 
@@ -258,9 +272,7 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    sidebar_width: u16,
-    sidebar_section_split: f32,
-    collapsed_space_keys: std::collections::HashSet<String>,
+    sidebar: SidebarSnapshotState,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -270,9 +282,10 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        sidebar_width: Some(sidebar_width),
-        sidebar_section_split: Some(sidebar_section_split),
-        collapsed_space_keys,
+        sidebar_width: Some(sidebar.width),
+        sidebar_section_split: Some(sidebar.section_split),
+        collapsed_space_keys: sidebar.collapsed_space_keys,
+        sidebar_agents_view: sidebar.agents_view,
     }
 }
 
@@ -538,9 +551,7 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.sidebar_width,
-            state.sidebar_section_split,
-            state.collapsed_space_keys.clone(),
+            state.sidebar_snapshot_state(),
         )
     }
 
@@ -605,6 +616,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            sidebar_agents_view: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -692,6 +704,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            sidebar_agents_view: false,
             version: SNAPSHOT_VERSION,
         };
 
@@ -873,10 +886,15 @@ mod tests {
         state.sidebar_section_split = 0.4;
         state.collapsed_space_keys.insert("repo-key".into());
 
+        state.sidebar_view = crate::app::state::SidebarView::Agents;
+
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.sidebar_width, Some(31));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+        assert!(snapshot.sidebar_agents_view);
+    }
+
     }
 
     #[test]
@@ -1254,6 +1272,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            sidebar_agents_view: false,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

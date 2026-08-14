@@ -139,6 +139,20 @@ pub enum HostCursorModeConfig {
     Drawn,
 }
 
+/// Which column the sidebar occupies.
+///
+/// `Center` puts it on the seam of a two-column split so the eye has one strip to
+/// watch instead of travelling to the edge. It only applies while the visible tab
+/// actually has a left/right split wide enough to give it up; anything else keeps
+/// the sidebar on the left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarPositionConfig {
+    #[default]
+    Left,
+    Center,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarCollapsedModeConfig {
@@ -832,6 +846,7 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+/// Which edge of the pane area the tab bar sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarPositionConfig {
@@ -886,6 +901,8 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    /// Which column the sidebar sits in. Saved values are "left" or "center". Default: "left".
+    pub sidebar_position: SidebarPositionConfig,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
     /// Text inserted between visible right-side tab bar entries. Default: one space.
@@ -1109,6 +1126,7 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
+            sidebar_position: SidebarPositionConfig::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),

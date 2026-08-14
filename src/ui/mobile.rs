@@ -114,7 +114,9 @@ pub(crate) fn mobile_switcher_workspace_doc_range(
     // in the entry list, not its raw array index.
     let pos = workspace_list_entries_expanded(app)
         .iter()
-        .position(|WorkspaceListEntry::Workspace { ws_idx, .. }| *ws_idx == idx)
+        .position(
+            |entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx),
+        )
         .unwrap_or(idx);
     // spaces sit after the agents block, then a title + "new workspace" row.
     let start = mobile_agents_block_height(app) + 2 + pos * 2;
@@ -177,9 +179,12 @@ pub(crate) fn mobile_switcher_target_at(
     let spaces_end = cursor + space_entries.len() * 2;
     if doc_row >= cursor && doc_row < spaces_end {
         let entry_idx = (doc_row - cursor) / 2;
-        return space_entries.get(entry_idx).map(
-            |WorkspaceListEntry::Workspace { ws_idx, .. }| MobileSwitcherTarget::Workspace(*ws_idx),
-        );
+        return space_entries.get(entry_idx).and_then(|entry| match entry {
+            WorkspaceListEntry::Workspace { ws_idx, .. } => {
+                Some(MobileSwitcherTarget::Workspace(*ws_idx))
+            }
+            WorkspaceListEntry::AgentPane { .. } => None,
+        });
     }
     cursor = spaces_end;
 
@@ -587,9 +592,10 @@ fn render_mobile_switcher_content(
     );
     doc_y += 1;
     let space_entries = workspace_list_entries_expanded(app);
-    for (entry_idx, WorkspaceListEntry::Workspace { ws_idx, indented }) in
-        space_entries.iter().enumerate()
-    {
+    for (entry_idx, entry) in space_entries.iter().enumerate() {
+        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry else {
+            continue;
+        };
         let Some(ws) = app.workspaces.get(*ws_idx) else {
             continue;
         };

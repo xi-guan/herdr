@@ -1023,6 +1023,8 @@ impl HeadlessServer {
                 focus: true,
                 label,
                 env: Default::default(),
+                // both callers are a person asking for a space, so it opens as a pair
+                second_column: true,
             }),
         )
     }
@@ -1266,9 +1268,7 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
             self.app.state.active,
             self.app.state.selected,
-            self.app.state.sidebar_width,
-            self.app.state.sidebar_section_split,
-            self.app.state.collapsed_space_keys.clone(),
+            self.app.state.sidebar_snapshot_state(),
         );
 
         let mut handoff_entries = Vec::new();
@@ -4646,6 +4646,8 @@ impl HeadlessServer {
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
 
+        changed |= self.app.state.tick_agent_spinner(now);
+
         if self
             .app
             .config_diagnostic_deadline
@@ -5541,9 +5543,11 @@ mod tests {
                 .into_iter()
                 .map(|(_, event)| event.event)
                 .collect::<Vec<_>>(),
+            // two panes: a space asked for by a person opens as two columns
             vec![
                 api::schema::EventKind::WorkspaceCreated,
                 api::schema::EventKind::TabCreated,
+                api::schema::EventKind::PaneCreated,
                 api::schema::EventKind::PaneCreated,
                 api::schema::EventKind::LayoutUpdated,
             ]
@@ -5744,6 +5748,9 @@ mod tests {
     async fn focused_terminal_title_syncs_without_requesting_a_sidebar_render() {
         let (mut server, control_rx) = window_title_test_server();
         server.app.configure_window_title("{terminal_title}");
+        // agent rows that carry no title token, so the only thing under test is
+        // whether the outer title sync drags a sidebar render along with it
+        server.app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         server.app.state.ensure_test_terminals();
         let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = server.app.state.workspaces[0]

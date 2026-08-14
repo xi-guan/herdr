@@ -105,7 +105,33 @@ pub struct Palette {
     pub peach: Color,
 }
 
+/// ANSI slots resolve to whatever the terminal picked, so only grey's conventional
+/// value is known here; anything else cannot take part in a blend.
+fn rgb_parts(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Gray => Some((128, 128, 128)),
+        _ => None,
+    }
+}
+
 impl Palette {
+    /// Rule between spaces. It has to outrank the rule between agents, which uses
+    /// `surface1`, while plain `overlay0` reads as too loud for a divider — so it
+    /// sits between them rather than adding a tier all 18 themes would have to define.
+    pub(crate) fn space_rule(&self) -> Color {
+        // all the way: a space boundary separates unrelated work and is the one
+        // break in the tree worth seeing without looking for it
+        const TOWARD_OVERLAY: f32 = 1.0;
+        let (Some(from), Some(to)) = (rgb_parts(self.surface1), rgb_parts(self.overlay0)) else {
+            return self.overlay0;
+        };
+        let mix = |from: u8, to: u8| {
+            (f32::from(from) + (f32::from(to) - f32::from(from)) * TOWARD_OVERLAY).round() as u8
+        };
+        Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+    }
+
     /// Catppuccin Mocha — the default.
     pub fn catppuccin() -> Self {
         Self {
@@ -162,13 +188,20 @@ impl Palette {
             sidebar_bg: Color::Reset,
             active_row_bg: Color::DarkGray,
             surface0: Color::Reset,
-            surface1: Color::DarkGray,
-            surface_dim: Color::DarkGray,
+            // a neutral grey reads warm against a blue-tinted terminal background,
+            // so both fill tiers carry the same cool bias instead of fighting it
+            surface1: Color::Rgb(74, 78, 108),
+            // the focused row's fill: about a 9% white wash over the terminal's own
+            // background, since a cell has no alpha to be translucent with. The rule
+            // at the row's right edge is what identifies it; this only tints.
+            surface_dim: Color::Rgb(47, 49, 65),
             overlay0: Color::Gray,
             overlay1: Color::White,
             text: Color::Reset,
             subtext0: Color::Gray,
-            mauve: Color::Gray,
+            // mauve is the branch tier; mapping it to Gray made branches
+            // indistinguishable from the agent rows beneath them
+            mauve: Color::Magenta,
             green: Color::Green,
             yellow: Color::Yellow,
             red: Color::LightRed,
@@ -631,6 +664,30 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+impl AppState {
+    /// Sidebar state to persist in a session snapshot. Collapsed agent rows are
+    /// pruned to live workspaces so the set cannot grow forever.
+    pub(crate) fn sidebar_snapshot_state(&self) -> crate::persist::SidebarSnapshotState {
+        crate::persist::SidebarSnapshotState {
+            width: self.sidebar_width,
+            section_split: self.sidebar_section_split,
+            collapsed_space_keys: self.collapsed_space_keys.clone(),
+            agents_view: self.sidebar_view == SidebarView::Agents,
+        }
+    }
+}
+
+/// Hit area for an agent row nested under a space row in the spaces view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarAgentRowArea {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
+    pub pane_id: PaneId,
+    pub rect: Rect,
+    /// True when the owning space row is itself an indented worktree child.
+    pub under_indented: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -786,6 +843,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub sidebar_agent_row_areas: Vec<SidebarAgentRowArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -991,6 +1049,13 @@ pub enum AgentPanelSort {
     Priority,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidebarView {
+    #[default]
+    Spaces,
+    Agents,
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -1148,7 +1213,6 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
-    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1391,6 +1455,12 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Frame for the sidebar's working indicator. Only advances while some agent is
+    /// working, so an idle sidebar redraws no more often than it did before.
+    pub agent_spinner_frame: u64,
+    pub next_agent_spinner_tick: Option<std::time::Instant>,
+    /// Workspace ids whose nested agent rows are hidden in the spaces tree.
+    /// Empty means every space shows its agents.
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1437,8 +1507,10 @@ pub struct AppState {
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
-    /// Ratio of sidebar height allocated to the workspaces section.
+    /// Retained so old session snapshots round-trip; no longer drives layout.
+    /// Remove with the next snapshot version bump.
     pub sidebar_section_split: f32,
+    pub sidebar_view: SidebarView,
     pub agent_panel_sort: AgentPanelSort,
     pub status_indicators: crate::config::StatusIndicatorStyle,
     /// Transient session-wide projection override for the built-in Agents view.
@@ -1466,6 +1538,7 @@ pub struct AppState {
     pub tab_bar_position: TabBarPositionConfig,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
+    pub sidebar_position: crate::config::SidebarPositionConfig,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1538,6 +1611,28 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Advance the sidebar's working indicator. Returns whether the frame moved, so
+    /// a sidebar with nothing running costs no redraws at all.
+    pub(crate) fn tick_agent_spinner(&mut self, now: std::time::Instant) -> bool {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
+        if self
+            .next_agent_spinner_tick
+            .is_some_and(|deadline| now < deadline)
+        {
+            return false;
+        }
+        let working = self
+            .terminals
+            .values()
+            .any(|terminal| matches!(terminal.state, crate::detect::AgentState::Working));
+        if !working {
+            self.next_agent_spinner_tick = None;
+            return false;
+        }
+        self.next_agent_spinner_tick = Some(now + INTERVAL);
+        self.agent_spinner_frame = self.agent_spinner_frame.wrapping_add(1);
+        true
+    }
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1754,6 +1849,8 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            agent_spinner_frame: 0,
+            next_agent_spinner_tick: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1771,6 +1868,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                sidebar_agent_row_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1810,6 +1908,7 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
+            sidebar_view: SidebarView::Spaces,
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             agent_view_override: None,
@@ -1834,6 +1933,7 @@ impl AppState {
             tab_bar_position: TabBarPositionConfig::Top,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
+            sidebar_position: crate::config::SidebarPositionConfig::default(),
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
@@ -2241,6 +2341,41 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    /// The sidebar tree stacks a space, its branch and its agents; each tier draws
+    /// from one of these, so a theme that aliases two of them erases a distinction.
+    #[test]
+    fn terminal_theme_keeps_the_sidebar_tree_tiers_distinct() {
+        let p = Palette::terminal();
+        assert_ne!(p.accent, p.mauve);
+        assert_ne!(p.mauve, p.overlay0);
+        assert_ne!(p.accent, p.overlay0);
+    }
+
+    /// The tick is the whole cost of the animation, so it must not run when there is
+    /// nothing to animate; an idle sidebar has to redraw exactly as often as before.
+    #[test]
+    fn the_spinner_tick_only_runs_while_an_agent_is_working() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("one");
+        state.workspaces = vec![ws];
+        state.ensure_test_terminals();
+        let now = std::time::Instant::now();
+
+        assert!(!state.tick_agent_spinner(now));
+        assert_eq!(state.agent_spinner_frame, 0);
+
+        for terminal in state.terminals.values_mut() {
+            terminal.state = crate::detect::AgentState::Working;
+        }
+        assert!(state.tick_agent_spinner(now));
+        assert_eq!(state.agent_spinner_frame, 1);
+        // still inside the interval: the frame holds rather than free-running
+        assert!(!state.tick_agent_spinner(now));
+        assert_eq!(state.agent_spinner_frame, 1);
+        assert!(state.tick_agent_spinner(now + std::time::Duration::from_millis(200)));
+        assert_eq!(state.agent_spinner_frame, 2);
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {

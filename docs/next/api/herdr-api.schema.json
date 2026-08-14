@@ -4168,6 +4168,11 @@
                 "string",
                 "null"
               ]
+            },
+            "second_column": {
+              "default": false,
+              "description": "Open the space as two side-by-side panes instead of one. Off by default: a\ncaller states what it wants and can split afterwards if it means to.",
+              "type": "boolean"
             }
           },
           "type": "object"

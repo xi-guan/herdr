@@ -14,6 +14,10 @@ pub struct WorkspaceCreateParams {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    /// Open the space as two side-by-side panes instead of one. Off by default: a
+    /// caller states what it wants and can split afterwards if it means to.
+    #[serde(default)]
+    pub second_column: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

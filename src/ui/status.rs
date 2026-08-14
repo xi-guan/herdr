@@ -193,6 +193,92 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
     }
 }
 
+
+/// Two stacked braille cells are a 2x8 dot grid; a short comet walking its
+/// perimeter turns without ever leaving the one column the indicator owns. Every
+/// other state fills both cells, so the column is the same width in every state
+/// and nothing beside it shifts as an agent starts or stops.
+const RING_LEFT: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
+const RING_RIGHT: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
+const RING_STEPS: u64 = 18;
+
+/// Which columns the comet lights at each step, and how far down it is. The two
+/// steps that light both columns are the top and bottom of the loop: without them
+/// the comet turns around in place and the ends read as a stall.
+fn ring_step(step: u64) -> (bool, bool, usize) {
+    match step {
+        0..=7 => (true, false, step as usize),
+        8 => (true, true, 7),
+        9..=16 => (false, true, (16 - step) as usize),
+        _ => (true, true, 0),
+    }
+}
+
+fn ring_cells(frame: u64) -> [String; 2] {
+    let mut masks = [0u8; 2];
+    for tail in 0..RING_COMET {
+        let step = (frame + RING_STEPS - tail) % RING_STEPS;
+        let (left, right, pos) = ring_step(step);
+        if left {
+            masks[pos / 4] |= RING_LEFT[pos % 4];
+        }
+        if right {
+            masks[pos / 4] |= RING_RIGHT[pos % 4];
+        }
+    }
+    masks.map(|mask| {
+        char::from_u32(0x2800 + u32::from(mask))
+            .unwrap_or(' ')
+            .to_string()
+    })
+}
+
+/// The two cells an agent row's indicator owns, top first.
+pub(super) fn agent_state_cells(
+    state: AgentState,
+    seen: bool,
+    frame: u64,
+    p: &Palette,
+) -> ([String; 2], Style) {
+    let (glyph, style) = state_dot(state, seen, p);
+        ["\u{2502}".to_string(), "\u{2502}".to_string()]
+    } else {
+        // box-drawing verticals join across the row boundary into one unbroken line,
+        // and carry far less weight than a filled block for the same column
+        ["\u{2503}".to_string(), "\u{2503}".to_string()]
+    };
+    (cells, style)
+}
+
+/// The indicator for an agent row: turning while it works, a static dot otherwise.
+pub(super) fn agent_state_icon(
+    state: AgentState,
+    seen: bool,
+    frame: u64,
+    p: &Palette,
+) -> (&'static str, Style) {
+    let (glyph, style) = state_dot(state, seen, p);
+    if matches!(state, AgentState::Working) {
+        return (SPINNER[(frame % SPINNER.len() as u64) as usize], style);
+    }
+    (glyph, style)
+}
+
+    const STEPS: u8 = 8;
+
+    };
+    for step in 0..=STEPS {
+            return candidate;
+        }
+    }
+}
+
+        // the agents themselves signal work in this tier, and a row that disagrees
+        // with the pane it points at reads as two different things happening
+        // one axis: colour means the row wants you, grey means it is done wanting you.
+        // `seen` is false when the agent finished while you were looking elsewhere,
+        // which is the completion you still have to read.
+        // a dash reads as "no agent here" at a glance; a middle dot disappears
 pub(super) fn state_icon_symbol(
     state: AgentState,
     seen: bool,
@@ -244,6 +330,79 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
     }
 }
 
+/// Every palette the sidebar can draw with, so a contrast rule covers all of them
+/// rather than only the one the author happened to be running.
+#[cfg(test)]
+pub(crate) const THEME_NAMES: [&str; 18] = [
+    "catppuccin",
+    "catppuccin-latte",
+    "terminal",
+    "tokyo-night",
+    "tokyo-night-day",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "gruvbox-light",
+    "one-dark",
+    "one-light",
+    "solarized",
+    "solarized-light",
+    "kanagawa",
+    "kanagawa-lotus",
+    "rose-pine",
+    "rose-pine-dawn",
+    "vesper",
+];
+
+/// ANSI slots are whatever the terminal decided, so only their conventional values
+/// are knowable here. `Reset` is the terminal's own colour and has none at all.
+pub(crate) fn resolve_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((128, 0, 0)),
+        Color::Green => Some((0, 128, 0)),
+        Color::Yellow => Some((128, 128, 0)),
+        Color::Blue => Some((0, 0, 128)),
+        Color::Magenta => Some((128, 0, 128)),
+        Color::Cyan => Some((0, 128, 128)),
+        Color::Gray => Some((192, 192, 192)),
+        Color::DarkGray => Some((128, 128, 128)),
+        Color::LightRed => Some((255, 0, 0)),
+        Color::LightGreen => Some((0, 255, 0)),
+        Color::LightYellow => Some((255, 255, 0)),
+        Color::LightBlue => Some((0, 0, 255)),
+        Color::LightMagenta => Some((255, 0, 255)),
+        Color::LightCyan => Some((0, 255, 255)),
+        Color::White => Some((255, 255, 255)),
+        _ => None,
+    }
+}
+
+/// WCAG relative luminance and contrast ratio. `None` when either colour is one the
+/// terminal owns, which is the honest answer rather than a guessed number.
+pub(crate) fn contrast_ratio(a: Color, b: Color) -> Option<f32> {
+    fn luminance((r, g, b): (u8, u8, u8)) -> f32 {
+        fn channel(value: u8) -> f32 {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    let (first, second) = (luminance(resolve_rgb(a)?), luminance(resolve_rgb(b)?));
+    let (lighter, darker) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +422,140 @@ mod tests {
         CopyFeedback {
             message: "copied to clipboard".to_string(),
         }
+    }
+
+    /// Anything the sidebar draws on the focused row's fill has to stay visible on
+    /// it. This is the rule the indicator broke when the fill and the idle mark were
+    /// handed the same palette entry: a ratio of exactly 1.0, invisible by
+    /// construction, and nothing in the suite noticed.
+    #[test]
+    fn every_indicator_stays_visible_on_the_row_it_marks() {
+        const FLOOR: f32 = 1.5;
+        let mut checked = 0;
+
+        for name in THEME_NAMES {
+            let palette = Palette::from_name(name).expect("named theme should resolve");
+            for (state, seen) in [
+                (AgentState::Blocked, true),
+                (AgentState::Working, true),
+                (AgentState::Idle, false),
+                (AgentState::Idle, true),
+                (AgentState::Unknown, true),
+            ] {
+                let mark = state_dot(state, seen, &palette)
+                    .1
+                    .fg
+                    .expect("a state mark always sets a colour");
+                for (label, background) in [
+                    ("focused row", palette.surface_dim),
+                    ("panel", palette.panel_bg),
+                ] {
+                    let Some(ratio) = contrast_ratio(mark, background) else {
+                        continue;
+                    };
+                    checked += 1;
+                    assert!(
+                        ratio >= FLOOR,
+                        "{name}: {state:?}/{seen} on the {label} is {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+
+        assert!(checked > 50, "only {checked} pairs were resolvable");
+    }
+
+    /// Colour is the axis the sidebar reads by, so two states sharing one entry
+    /// erases a distinction silently — which is how mauve and overlay0 both became
+    /// grey in the terminal theme and made a branch look like an agent.
+    #[test]
+    fn no_two_agent_states_share_a_colour() {
+        for name in THEME_NAMES {
+            let palette = Palette::from_name(name).expect("named theme should resolve");
+            // Unknown is the space row's "no agent here" mark and never shares a
+            // column with these, so it is free to reuse a colour.
+            let marks = [
+                (AgentState::Blocked, true),
+                (AgentState::Working, true),
+                (AgentState::Idle, false),
+                (AgentState::Idle, true),
+            ]
+            .map(|(state, seen)| state_dot(state, seen, &palette).1.fg);
+
+            for (first, second) in
+                (0..marks.len()).flat_map(|i| (i + 1..marks.len()).map(move |j| (i, j)))
+            {
+                assert_ne!(
+                    marks[first], marks[second],
+                    "{name}: states {first} and {second} share a colour"
+                );
+            }
+        }
+    }
+
+    /// The two cells stack into one column: the same width in every state and every
+    /// frame, so an agent starting or stopping never nudges the text beside it.
+    #[test]
+    fn the_two_row_indicator_keeps_one_column_in_every_state() {
+        let palette = Palette::catppuccin();
+        let width = |cells: [String; 2]| {
+            cells.map(|cell| unicode_width::UnicodeWidthStr::width(cell.as_str()))
+        };
+
+        let first = agent_state_cells(AgentState::Working, true, 0, &palette).0;
+        let later = agent_state_cells(AgentState::Working, true, 5, &palette).0;
+        assert_ne!(first, later, "a working agent has to turn");
+        // every step moves: a repeated frame is the stall the crossings exist to fix
+        let cycle = (0..RING_STEPS)
+            .map(|frame| agent_state_cells(AgentState::Working, true, frame, &palette).0)
+            .collect::<Vec<_>>();
+        for pair in cycle.windows(2) {
+            assert_ne!(pair[0], pair[1], "the comet has to advance every step");
+        }
+        assert_ne!(
+            cycle[RING_STEPS as usize - 1],
+            cycle[0],
+            "the loop has to close"
+        );
+        assert_eq!(width(first), [1, 1]);
+        assert_eq!(width(later), [1, 1]);
+
+        for (state, seen, expected) in [
+            (AgentState::Blocked, true, ["┃", "┃"]),
+            (AgentState::Idle, false, ["┃", "┃"]),
+            // idle keeps the line and drops its weight
+            (AgentState::Idle, true, ["│", "│"]),
+            (AgentState::Unknown, true, ["┃", "┃"]),
+        ] {
+            let held = agent_state_cells(state, seen, 0, &palette).0;
+            assert_eq!(held, agent_state_cells(state, seen, 9, &palette).0);
+            assert_eq!(held, expected.map(str::to_string), "{state:?} {seen}");
+            assert_eq!(width(held), [1, 1]);
+        }
+    }
+
+    /// The indicator column is one cell wide in every state, and only the working
+    /// state moves — motion has to mean exactly one thing.
+    #[test]
+    fn only_a_working_agent_turns_and_every_state_stays_one_cell() {
+        let palette = Palette::catppuccin();
+        let width = |glyph: &str| unicode_width::UnicodeWidthStr::width(glyph);
+
+        let first = agent_state_icon(AgentState::Working, true, 0, &palette).0;
+        let next = agent_state_icon(AgentState::Working, true, 1, &palette).0;
+        assert_ne!(first, next);
+
+        for (state, seen) in [
+            (AgentState::Blocked, true),
+            (AgentState::Idle, false),
+            (AgentState::Idle, true),
+            (AgentState::Unknown, true),
+        ] {
+            let held = agent_state_icon(state, seen, 0, &palette).0;
+            assert_eq!(held, agent_state_icon(state, seen, 7, &palette).0);
+            assert_eq!(width(held), 1, "{state:?} {seen}");
+        }
+        assert_eq!(width(first), 1);
     }
 
     #[test]

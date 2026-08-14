@@ -54,6 +54,7 @@ fn request_uses_dot_method_names() {
             focus: true,
             label: Some("api".into()),
             env: Default::default(),
+            second_column: false,
         }),
     };
 

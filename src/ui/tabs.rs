@@ -9,6 +9,50 @@ use super::text::display_width_u16;
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 
+/// The chip an inactive tab sits on. `surface0` is the tier for it, but a theme may
+/// leave that to the terminal, and then an inactive tab has no chip at all — only
+/// text floating beside the filled active one, which is what stops it reading as a
+/// tab. `surface_dim` is the same wash the sidebar's focused row uses and is always
+/// a concrete colour.
+///
+/// A chip is an area rather than text, so it needs far less separation from the bar
+/// than a label needs from the chip — but it does need some, or the tab has no edges.
+/// Taking that separation from the bar itself is what makes it the same amount in a
+/// light theme as in a dark one; a fixed surface tier lands on either side of the bar
+/// depending on the theme, and in some it lands on top of it.
+fn tab_chip_bg(p: &Palette) -> Color {
+    const FLOOR: f32 = 1.15;
+
+    match super::status::resolve_rgb(p.panel_bg).zip(super::status::resolve_rgb(p.text)) {
+        Some(_) => super::status::lift_until_legible(p.panel_bg, p.text, p.panel_bg, FLOOR),
+        // the theme leaves both to the terminal, so there is nothing to blend from;
+        // `surface_dim` is the concrete wash the sidebar's focused row already uses
+        None => p.surface_dim,
+    }
+}
+
+/// How a tab draws. Split out from the render loop so the contrast rules that keep
+/// every tab legible can be checked against all themes rather than the one running.
+/// The chip is passed in because it is the same for every tab on the bar and costs a
+/// walk through the contrast maths to find.
+fn tab_chip_style(active: bool, auto_named: bool, chip: Color, p: &Palette) -> Style {
+    if active {
+        let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
+        if auto_named {
+            base
+        } else {
+            base.add_modifier(Modifier::BOLD)
+        }
+    } else {
+        // an unnamed tab has nothing to say and recedes by a tier; it used to also
+        // carry DIM, which halved an already-muted tier into near-invisibility
+        let quiet = if auto_named { p.overlay0 } else { p.overlay1 };
+        Style::default()
+            .fg(super::status::lift_until_legible(quiet, p.text, chip, 2.5))
+            .bg(chip)
+    }
+}
+
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
@@ -25,6 +69,16 @@ pub(crate) struct TabBarView {
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+}
+
+/// Whether the only tab is carrying nothing but its own number. A lone tab is not a
+/// choice, and a chip reading `1` costs a corner of the bar to say so; a name is
+/// different, since you gave it one for a reason.
+fn lone_tab_is_only_a_placeholder(ws: &crate::workspace::Workspace) -> bool {
+    match ws.tabs.as_slice() {
+        [only] => only.is_auto_named() && !only.zoomed,
+        _ => false,
+    }
 }
 
 fn tab_width(ws: &crate::workspace::Workspace, tab_idx: usize) -> u16 {
@@ -187,6 +241,22 @@ pub(crate) fn compute_tab_bar_view(
         return TabBarView::default();
     }
 
+    if lone_tab_is_only_a_placeholder(ws) {
+        // nothing to switch to and nothing the chip could say; `+` is still an action,
+        // and the bar itself stays because it carries the usage figures
+        return TabBarView {
+            scroll: 0,
+            tab_hit_areas: vec![Rect::default(); ws.tabs.len()],
+            scroll_left_hit_area: Rect::default(),
+            scroll_right_hit_area: Rect::default(),
+            new_tab_hit_area: if mouse_chrome {
+                Rect::new(area.x, area.y, NEW_TAB_WIDTH.min(area.width), 1)
+            } else {
+                Rect::default()
+            },
+        };
+    }
+
     if !mouse_chrome {
         let max_scroll = max_tab_scroll(ws, area);
         let scroll = if follow_active {
@@ -327,6 +397,8 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     };
     let p = &app.palette;
+    // one chip for the whole bar: it depends on nothing but the palette
+    let chip = tab_chip_bg(p);
 
     frame.render_widget(
         Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(p.panel_bg)),
@@ -354,11 +426,11 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
     if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
         let style = if can_scroll_left {
-            Style::default().fg(p.overlay1).bg(p.surface0)
+            Style::default().fg(p.overlay1).bg(chip)
         } else {
             Style::default()
                 .fg(p.overlay0)
-                .bg(p.surface0)
+                .bg(chip)
                 .add_modifier(Modifier::DIM)
         };
         frame.render_widget(
@@ -369,11 +441,11 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
     if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
         let style = if can_scroll_right {
-            Style::default().fg(p.overlay1).bg(p.surface0)
+            Style::default().fg(p.overlay1).bg(chip)
         } else {
             Style::default()
                 .fg(p.overlay0)
-                .bg(p.surface0)
+                .bg(chip)
                 .add_modifier(Modifier::DIM)
         };
         frame.render_widget(
@@ -389,22 +461,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if rect.width == 0 {
             continue;
         }
-        let active = idx == ws.active_tab;
-        let style = if active {
-            let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
-            if tab.is_auto_named() {
-                base
-            } else {
-                base.add_modifier(Modifier::BOLD)
-            }
-        } else if tab.is_auto_named() {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(p.surface0)
-                .add_modifier(Modifier::DIM)
-        } else {
-            Style::default().fg(p.overlay1).bg(p.surface0)
-        };
+        let style = tab_chip_style(idx == ws.active_tab, tab.is_auto_named(), chip, p);
         let width = rect.width as usize;
         let name = tab_chrome_label(ws, idx);
         // Pad by terminal columns, not chars, so wide glyphs stay centered.
@@ -642,7 +699,10 @@ mod tests {
             )),
             crate::app::state::TabBarStatusSegment::Text(Some("14:30".into())),
         ];
-        app.workspaces = vec![Workspace::test_new("test")];
+        // a named tab, because a lone auto-named one draws no chip to compete with
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name("one".into());
+        app.workspaces = vec![ws];
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
 
@@ -722,7 +782,9 @@ mod tests {
     #[test]
     fn active_auto_named_tab_keeps_readable_weight() {
         let mut app = AppState::test_new();
-        let ws = Workspace::test_new("test");
+        let mut ws = Workspace::test_new("test");
+        // a lone auto-named tab draws no chip at all, so there has to be a choice
+        ws.test_add_tab(None);
 
         app.workspaces = vec![ws];
         app.active = Some(0);
@@ -742,6 +804,78 @@ mod tests {
         assert_eq!(style.bg, Some(app.palette.accent));
         assert!(!style.add_modifier.contains(Modifier::DIM));
         assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// A lone tab is not a choice, so its chip says only what its number already
+    /// implies. The bar itself stays: it carries the usage figures, and `+` is still
+    /// something to press.
+    #[test]
+    fn a_lone_numbered_tab_leaves_the_bar_to_the_plus() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, true);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+
+        let row = render_bar(&app, 30);
+
+        assert_eq!(row.trim(), "+", "bar row: {row:?}");
+        // no chip means no way to click one, so the hit area has to go with it
+        assert_eq!(app.view.tab_hit_areas[0].width, 0);
+
+        // a name is different: you gave it one for a reason
+        app.workspaces[0].tabs[0].set_custom_name("logs".into());
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, true);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+
+        assert!(render_bar(&app, 30).contains("logs"));
+    }
+
+    /// A tab you cannot see is a tab you cannot switch to. The inactive chip is the
+    /// one that breaks: the active tab is filled with the accent and obvious in any
+    /// theme, while the inactive one used to be muted text with DIM on top, sitting
+    /// on a `surface0` that the terminal theme leaves to the terminal — so it had no
+    /// chip and near-invisible ink.
+    #[test]
+    fn every_tab_stays_legible_on_its_own_chip() {
+        const INK_FLOOR: f32 = 2.5;
+        const CHIP_FLOOR: f32 = 1.1;
+        let mut checked = 0;
+
+        for name in crate::ui::status::THEME_NAMES {
+            let p = crate::app::state::Palette::from_name(name).expect("named theme resolves");
+            for auto_named in [true, false] {
+                for active in [true, false] {
+                    let style = tab_chip_style(active, auto_named, tab_chip_bg(&p), &p);
+                    let (Some(ink), Some(chip)) = (style.fg, style.bg) else {
+                        panic!("{name}: a tab always sets both colours");
+                    };
+                    assert!(!style.add_modifier.contains(Modifier::DIM));
+                    if let Some(ratio) = crate::ui::status::contrast_ratio(ink, chip) {
+                        checked += 1;
+                        assert!(
+                            ratio >= INK_FLOOR,
+                            "{name}: {}{} label on its chip is {ratio:.2}:1",
+                            if active { "active " } else { "inactive " },
+                            if auto_named { "auto-named" } else { "named" }
+                        );
+                    }
+                    // the chip has to separate from the bar it sits in, or the tab
+                    // has no edges and reads as loose text
+                    if let Some(ratio) = crate::ui::status::contrast_ratio(chip, p.panel_bg) {
+                        assert!(
+                            ratio >= CHIP_FLOOR,
+                            "{name}: chip on the bar is {ratio:.2}:1"
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(checked > 50, "only {checked} pairs were resolvable");
     }
 
     #[test]

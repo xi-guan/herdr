@@ -1023,6 +1023,7 @@ impl App {
                             focus: true,
                             label,
                             env: Default::default(),
+                            second_column: true,
                         },
                     );
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
@@ -1459,6 +1460,51 @@ mod tests {
             workspace_create_label("  logs  ", "project").as_deref(),
             Some("logs")
         );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_hidden_space_opens_it_as_a_pair_and_shows_the_tree_again() {
+        use crate::app::api::test_support::{exiting_test_command, shutdown_test_runtimes};
+
+        let mut app = app_with_test_workspaces(&[]);
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.hidden_spaces = vec![crate::app::state::HiddenSpace {
+            id: "ws_9".into(),
+            label: Some("away".into()),
+            cwd: std::env::temp_dir(),
+        }];
+        app.state.selected_hidden_space = Some("ws_9".into());
+        app.state.sidebar_view = crate::app::state::SidebarView::Hidden;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::HiddenSpace {
+                workspace_id: "ws_9".into(),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let restore_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Restore")
+            .expect("restore sits in the hidden space menu");
+
+        app.apply_context_menu_action_via_api(menu, restore_idx);
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.pane_ids().len(),
+            2,
+            "it comes back as a pair, like any new space"
+        );
+        assert!(app.state.hidden_spaces.is_empty());
+        assert_eq!(app.state.selected_hidden_space, None);
+        assert_eq!(
+            app.state.sidebar_view,
+            crate::app::state::SidebarView::Spaces
+        );
+        shutdown_test_runtimes(&mut app);
     }
 
     fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {

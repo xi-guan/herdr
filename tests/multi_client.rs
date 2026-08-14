@@ -873,11 +873,13 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     drain_server_messages(&mut setup_client, Duration::from_millis(250));
 
     let wheel_down = b"\x1b[<65;10;30M";
-    send_client_input(&mut setup_client, &wheel_down.repeat(20));
+    // enough wheel events to hit the clamp whatever the rows cost: the sidebar spends
+    // a line on its view switcher, so the same list scrolls further than it used to
+    send_client_input(&mut setup_client, &wheel_down.repeat(80));
     let (reached_bottom, setup_frames) = wait_for_frame_matching_with_snapshots(
         &mut setup_client,
         Duration::from_secs(3),
-        |frame| agent_panel_starts_with(frame, "agent-16"),
+        |frame| agent_panel_starts_with(frame, "agent-15"),
     )
     .expect("setup frame decoding should succeed");
     assert!(
@@ -893,7 +895,7 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     let mut probe = connect_raw_client(&client_socket, 106, 40);
     let (started_at_tall_limit, initial_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-10")
+            agent_panel_starts_with(frame, "agent-09")
         })
         .expect("initial probe frame decoding should succeed");
     assert!(
@@ -906,7 +908,7 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     send_client_input(&mut probe, wheel_down);
     let (scrolled, probe_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-11")
+            agent_panel_starts_with(frame, "agent-10")
         })
         .expect("probe frame decoding should succeed");
     assert!(

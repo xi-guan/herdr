@@ -114,6 +114,7 @@ impl App {
                 focus: true,
                 label: None,
                 env: Default::default(),
+                second_column: true,
             },
         );
         self.state.mode = if self.state.active.is_some() {
@@ -218,12 +219,26 @@ impl App {
         Ok(idx)
     }
 
+    /// Open a space the way a person opens one: two columns.
     pub(crate) fn create_workspace_with_options(
         &mut self,
         initial_cwd: PathBuf,
         focus: bool,
     ) -> std::io::Result<usize> {
-        self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new())
+        self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new(), true)
+    }
+
+    /// Open a space with exactly the one pane that was asked for.
+    ///
+    /// The second column is a convenience for someone opening a space by hand. A
+    /// caller driving the API is stating what it wants, so it gets that and nothing
+    /// else — it can split afterwards if it means to.
+    pub(crate) fn create_workspace_via_api(
+        &mut self,
+        initial_cwd: PathBuf,
+        focus: bool,
+    ) -> std::io::Result<usize> {
+        self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new(), false)
     }
 
     #[cfg(test)]
@@ -242,8 +257,10 @@ impl App {
         initial_cwd: PathBuf,
         focus: bool,
         extra_env: Vec<(String, String)>,
+        second_column: bool,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
+        let second_column_cwd = initial_cwd.clone();
         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
             initial_cwd,
             rows,
@@ -263,6 +280,9 @@ impl App {
         let idx = self.state.workspaces.len() - 1;
         self.state
             .remove_alias_shadowed_by_new_pane(self.state.workspaces[idx].tabs[0].root_pane);
+        if second_column {
+            self.open_second_column(idx, second_column_cwd);
+        }
         let workspace_id = self.state.workspaces[idx].id.clone();
         let root_pane = self.state.workspaces[idx].tabs[0].root_pane.raw();
         crate::logging::workspace_created(&workspace_id, root_pane);
@@ -272,6 +292,51 @@ impl App {
         }
         self.schedule_session_save();
         Ok(idx)
+    }
+
+    /// Give a new space its second column.
+    ///
+    /// A space is almost always used as a pair — something running on one side, a
+    /// shell to ask in on the other — so it opens that way instead of making every
+    /// new space repeat the same split. The second pane is a plain shell: only the
+    /// first one carries the launch env a caller asked for.
+    fn open_second_column(&mut self, ws_idx: usize, cwd: PathBuf) {
+        let (rows, cols) = self.state.estimate_pane_size();
+        let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+        let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
+        let default_shell = self.state.default_shell.clone();
+        let shell_mode = self.state.shell_mode;
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        let Some(root_pane) = ws.tabs.first().map(|tab| tab.root_pane) else {
+            return;
+        };
+        // not focused: a new space should open on the column its caller seeded, not on
+        // the spare shell beside it
+        let Some(Ok((_, new_pane))) = ws.split_pane(
+            root_pane,
+            ratatui::layout::Direction::Horizontal,
+            rows,
+            (cols / 2).max(10),
+            Some(cwd),
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            crate::pane::PaneShellConfig::new(&default_shell, shell_mode),
+            Vec::new(),
+            false,
+        ) else {
+            return;
+        };
+        self.terminal_runtimes
+            .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(new_pane.pane_id);
+        self.state
+            .terminals
+            .insert(new_pane.terminal.id.clone(), new_pane.terminal);
     }
 
     pub(super) fn collect_panes_for_workspace(
@@ -357,6 +422,30 @@ impl App {
             },
         });
         self.emit_tab_and_pane_created_events(tab, root_pane);
+        // a space opens with a second column, and a client that only heard about the
+        // root would hold a pane list the layout event then contradicts
+        let others: Vec<_> = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.first())
+            .map(|tab| {
+                let root = tab.root_pane;
+                tab.layout
+                    .pane_ids()
+                    .into_iter()
+                    .filter(|id| *id != root)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for pane_id in others {
+            if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneCreated,
+                    data: EventData::PaneCreated { pane },
+                });
+            }
+        }
         self.emit_layout_updated_event(ws_idx, 0);
     }
 

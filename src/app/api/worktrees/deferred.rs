@@ -399,7 +399,7 @@ impl App {
                 }
                 (ws_idx, false)
             } else {
-                match self.create_workspace_with_options(result.path.clone(), api.focus) {
+                match self.create_workspace_via_api(result.path.clone(), api.focus) {
                     Ok(ws_idx) => (ws_idx, true),
                     Err(err) => {
                         Self::send_api_response(

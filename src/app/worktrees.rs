@@ -1100,15 +1100,48 @@ mod tests {
 
         app.create_workspace();
 
+        // two panes because a space opened by hand opens as two columns; the API
+        // creator stays at one, so the paths no longer emit the same run of events
         assert_eq!(
             event_kinds(&event_hub),
             vec![
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::LayoutUpdated,
             ]
         );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn a_space_opened_by_hand_opens_as_two_columns() {
+        let mut app = app_for_worktree_tests_with_event_hub(crate::api::EventHub::default());
+
+        app.create_workspace();
+
+        let ws = app.state.workspaces.last().expect("workspace created");
+        let tab = &ws.tabs[0];
+        let panes = tab.layout.panes(ratatui::layout::Rect::new(0, 0, 100, 20));
+        assert_eq!(panes.len(), 2);
+        // side by side, not stacked: the seam is the one the centered sidebar needs
+        assert_eq!(panes[0].rect.y, panes[1].rect.y);
+        assert_ne!(panes[0].rect.x, panes[1].rect.x);
+        // the spare shell is the second column, so typing lands where work starts
+        assert_eq!(tab.layout.focused(), tab.root_pane);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn a_space_created_through_the_api_gets_only_the_pane_it_asked_for() {
+        let mut app = app_for_worktree_tests_with_event_hub(crate::api::EventHub::default());
+
+        app.create_workspace_via_api(std::env::temp_dir(), true)
+            .expect("workspace created");
+
+        let ws = app.state.workspaces.last().expect("workspace created");
+        assert_eq!(ws.tabs[0].panes.len(), 1);
         shutdown_test_runtimes(&mut app);
     }
 
@@ -1315,6 +1348,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeOpened,
             ]
@@ -1362,6 +1396,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceUpdated,
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeOpened,
@@ -1775,6 +1810,7 @@ mod tests {
             vec![
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::PaneCreated,
                 crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeCreated,
