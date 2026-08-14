@@ -1147,13 +1147,15 @@ impl AppState {
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             self.ensure_workspace_visible(idx);
+            let mut acknowledged = Vec::new();
             if let Some(ws) = self.workspaces.get_mut(idx) {
                 let active_tab = ws.active_tab;
-                ws.switch_tab(active_tab);
+                acknowledged = ws.switch_tab(active_tab);
                 let tab_id =
                     public_tab_id_for_index(ws, active_tab).unwrap_or_else(|| workspace_id.clone());
                 crate::logging::tab_focused(&workspace_id, &tab_id);
             }
+            self.hold_acknowledged(acknowledged);
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
@@ -1183,12 +1185,14 @@ impl AppState {
         }
         self.mark_session_dirty();
         self.ensure_workspace_visible(ws_idx);
+        let mut acknowledged = Vec::new();
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
-            ws.switch_tab(tab_idx);
+            acknowledged = ws.switch_tab(tab_idx);
             let tab_id =
                 public_tab_id_for_index(ws, tab_idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
         }
+        self.hold_acknowledged(acknowledged);
         self.tab_scroll_follow_active = true;
         self.refresh_tab_bar_view();
         self.record_pane_focus_after_navigation(previous_focus);
@@ -1290,10 +1294,11 @@ impl AppState {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };
-            ws.switch_tab(idx);
+            let acknowledged = ws.switch_tab(idx);
             let workspace_id = ws.id.clone();
             let tab_id = public_tab_id_for_index(ws, idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
+            self.hold_acknowledged(acknowledged);
             self.mark_session_dirty();
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -1314,14 +1319,43 @@ impl AppState {
             return false;
         };
 
-        let mut changed = false;
-        for pane in tab.panes.values_mut() {
-            if !pane.seen {
+        let acknowledged = tab
+            .panes
+            .values_mut()
+            .filter(|pane| !pane.seen)
+            .map(|pane| {
                 pane.seen = true;
-                changed = true;
             }
+                pane.attached_terminal_id.clone()
+            })
+            .collect::<Vec<_>>();
+        self.hold_acknowledged(acknowledged)
+    }
+
+    /// Hold the colour these panes were wearing when you got to them. Without it
+    /// the mark that said "finished, you missed it" is gone in the same frame as
+    /// the arrival that answered it, and the two never read as the same thing.
+    pub(crate) fn hold_acknowledged(
+        &mut self,
+        terminal_ids: Vec<crate::terminal::TerminalId>,
+    ) -> bool {
+        if terminal_ids.is_empty() {
+            return false;
         }
-        changed
+        let now = Instant::now();
+        for terminal_id in terminal_ids {
+            self.acknowledged_at.insert(terminal_id, now);
+        }
+        true
+    }
+
+    /// Working in a pane is the real acknowledgement, so the held colour goes as
+    /// soon as you type into it rather than waiting out its clock.
+    pub(crate) fn release_acknowledged_hold(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(terminal_id) = self.terminal_id_for_pane(ws_idx, pane_id) else {
+            return false;
+        };
+        self.acknowledged_at.remove(&terminal_id).is_some()
     }
 
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
@@ -3163,12 +3197,23 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
+        let mut watched_completion = None;
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if !suppress_completion && is_completion_transition(change) {
             pane.seen = suppress_active_tab_notifications;
+            if pane.seen {
+                watched_completion = Some(pane.attached_terminal_id.clone());
+            }
         }
         let seen = pane.seen;
+
+        // a completion you were already watching lands the same way as one you clicked
+        // over to: it holds its colour for a moment. Without this the border goes from
+        // working straight back to chrome and the answer never arrives anywhere.
+        if let Some(terminal_id) = watched_completion {
+            self.acknowledged_at.insert(terminal_id, Instant::now());
+        }
 
         if !suppress_completion {
             if let Some(delivery) =
@@ -5135,6 +5180,39 @@ mod tests {
         assert!(pane.seen);
     }
 
+    /// A completion you were already watching is still a completion, and holds its
+    /// colour for the same window as one you clicked over to. Marking the pane seen at
+    /// the transition took the border from working straight back to chrome, so green
+    /// never appeared at all on the pane you were looking at.
+    #[test]
+    fn a_watched_completion_still_holds_its_colour() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert!(state.workspaces[0].panes.get(&pane_id).unwrap().seen);
+        assert!(state.within_acknowledged_hold(&terminal_id, Instant::now()));
+    }
+
     #[test]
     fn initial_idle_in_background_stays_seen() {
         let mut state = app_with_workspaces(&["active", "background"]);
@@ -6187,7 +6265,7 @@ mod tests {
         let mut state = app_with_workspaces(&["test"]);
         let tab_idx = state.workspaces[0].test_add_tab(Some("logs"));
         state.ensure_test_terminals();
-        state.workspaces[0].switch_tab(tab_idx);
+        let _ = state.workspaces[0].switch_tab(tab_idx);
         let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
         let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
         state.plugin_panes.insert(

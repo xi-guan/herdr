@@ -266,7 +266,7 @@ mod tests {
         workspace.cached_git_ahead_behind = None;
         workspace.cached_git_space = None;
         workspace.test_add_tab(Some("logs"));
-        workspace.switch_tab(0);
+        let _ = workspace.switch_tab(0);
         let left = workspace.tabs[0].root_pane;
         let right = workspace.test_split(Direction::Horizontal);
         workspace.insert_test_runtime(

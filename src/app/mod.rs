@@ -531,6 +531,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            acknowledged_at: std::collections::HashMap::new(),
             agent_spinner_frame: 0,
             next_agent_spinner_tick: None,
             terminals: std::collections::HashMap::new(),
@@ -4540,10 +4541,10 @@ mod tests {
         let active_pane = workspace.tabs[0].root_pane;
         let background_tab = workspace.test_add_tab(Some("worker"));
         let target_pane = workspace.tabs[background_tab].root_pane;
-        workspace.switch_tab(background_tab);
+        let _ = workspace.switch_tab(background_tab);
         let background_previous_focus =
             workspace.test_split(ratatui::layout::Direction::Horizontal);
-        workspace.switch_tab(0);
+        let _ = workspace.switch_tab(0);
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         let split_cwd = std::env::temp_dir();
@@ -4637,7 +4638,7 @@ mod tests {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("api-pane-split-focus-background-tab");
         let background_tab = workspace.test_add_tab(Some("worker"));
-        workspace.switch_tab(0);
+        let _ = workspace.switch_tab(0);
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -4886,7 +4887,7 @@ mod tests {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("api-pane-close");
         let second_tab = workspace.test_add_tab(Some("logs"));
-        workspace.switch_tab(second_tab);
+        let _ = workspace.switch_tab(second_tab);
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);

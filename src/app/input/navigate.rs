@@ -2753,7 +2753,7 @@ resize_pane_left = "prefix+shift+left"
             ws.tabs[0].set_custom_name("a".into());
             ws.test_add_tab(Some("b"));
             ws.test_add_tab(Some("c"));
-            ws.switch_tab(1);
+            let _ = ws.switch_tab(1);
         }
 
         execute_navigate_action(&mut state, NavigateAction::MoveTabNext);

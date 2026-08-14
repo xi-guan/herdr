@@ -298,6 +298,7 @@ impl App {
         }
 
         changed |= self.state.tick_agent_spinner(now);
+        changed |= self.state.expire_acknowledged_holds(now);
 
         if self
             .config_diagnostic_deadline
@@ -600,6 +601,9 @@ impl App {
             include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            // the held colour has to be repainted the moment it runs out, or it stays
+            // until something else happens to redraw
+            self.state.next_acknowledged_hold_expiry(),
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,

@@ -3719,7 +3719,7 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.workspaces.push(Workspace::test_new("other"));
         let target_tab_idx = app.state.workspaces[1].test_add_tab(Some("target"));
-        app.state.workspaces[1].switch_tab(target_tab_idx);
+        let _ = app.state.workspaces[1].switch_tab(target_tab_idx);
         let target_pane = app.state.workspaces[1].tabs[target_tab_idx].root_pane;
         app.state.ensure_test_terminals();
         let target_public = app.public_pane_id(1, target_pane).unwrap();

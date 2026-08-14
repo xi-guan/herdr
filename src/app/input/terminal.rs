@@ -57,6 +57,10 @@ impl App {
         let sent = self
             .lookup_runtime_sender(input.ws_idx, input.pane_id)
             .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
+        if sent {
+            self.state
+                .release_acknowledged_hold(input.ws_idx, input.pane_id);
+        }
         sent.then_some(input.target)
     }
 

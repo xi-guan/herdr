@@ -4647,6 +4647,7 @@ impl HeadlessServer {
         // Client resize messages drive size changes instead.
 
         changed |= self.app.state.tick_agent_spinner(now);
+        changed |= self.app.state.expire_acknowledged_holds(now);
 
         if self
             .app
@@ -8937,9 +8938,11 @@ next_tab = ""
         assert!(!mobile_surface.contains("background"));
 
         let foreground_terminal_area = Rect::new(26, 1, 94, 39);
+        // the pane wears a border on every side and the scrollbar gutter takes one
+        // more column
         let expected_pane_size = (
-            foreground_terminal_area.height,
-            foreground_terminal_area.width.saturating_sub(1),
+            foreground_terminal_area.height.saturating_sub(2),
+            foreground_terminal_area.width.saturating_sub(3),
         );
         assert_eq!(
             server.app.state.view.layout,
@@ -8998,7 +9001,11 @@ next_tab = ""
         server.resize_shared_runtime_to_effective_size();
 
         let terminal_area = server.app.state.view.terminal_area;
-        let expected = (terminal_area.height, terminal_area.width.saturating_sub(1));
+        // border on every side, then the scrollbar gutter
+        let expected = (
+            terminal_area.height.saturating_sub(2),
+            terminal_area.width.saturating_sub(3),
+        );
         assert_eq!(
             server
                 .app
@@ -9617,7 +9624,7 @@ next_tab = ""
         let sources = HashSet::from([background_pane]);
         assert!(!server.pty_sources_visible_to_any_render_target(&sources));
 
-        server.app.state.workspaces[0].switch_tab(1);
+        let _ = server.app.state.workspaces[0].switch_tab(1);
         assert!(server.pty_sources_visible_to_any_render_target(&sources));
     }
 
@@ -9680,7 +9687,7 @@ next_tab = ""
         );
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
-        server.app.state.workspaces[0].switch_tab(background_tab);
+        let _ = server.app.state.workspaces[0].switch_tab(background_tab);
         server.render_and_stream();
         let visible_frame = read_server_frame(
             client_rx

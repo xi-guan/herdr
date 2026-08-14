@@ -13,6 +13,7 @@ use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
+use crate::detect::AgentState;
 use crate::layout::PaneInfo;
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
@@ -124,7 +125,10 @@ pub(crate) fn apply_pane_chrome(
                 }
             }
 
-            info.borders = if !multi_pane || !pane_borders {
+            // drawn whatever the pane count: the border carries the agent's state as
+            // well as focus, and a lone pane is exactly where that state has nowhere
+            // else to appear
+            info.borders = if !pane_borders {
                 Borders::NONE
             } else {
                 let mut borders = Borders::ALL;
@@ -203,13 +207,13 @@ pub(super) fn resize_tab_panes(
     area: crate::layout::PaneArea,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    let multi_pane = tab.layout.pane_count() > 1;
-
     if tab.zoomed {
         let area = area.bounds();
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
-            let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
+            // a lone pane's border is all outer border, so the setting is the only
+            // thing that decides it; the pane count no longer does
+            let borders = if app.pane_borders && app.pane_outer_borders {
                 Borders::ALL
             } else {
                 Borders::NONE
@@ -264,13 +268,10 @@ pub(super) fn compute_pane_infos(
     let Some(ws) = app.workspaces.get(ws_idx) else {
         return Vec::new();
     };
-
-    let multi_pane = ws.layout.pane_count() > 1;
-
     if ws.zoomed {
         let area = area.bounds();
         let focused_id = ws.layout.focused();
-        let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
+        let borders = if app.pane_borders && app.pane_outer_borders {
             Borders::ALL
         } else {
             Borders::NONE
@@ -500,6 +501,23 @@ fn render_pane_borders(
     }
     add_split_border_cells(app.pane_gaps, split_borders, &mut cells);
 
+    // the colour belongs to the pane and the palette, never to the cell: resolving it
+    // per cell put a clock read, two lookups and the contrast maths on every character
+    // of every edge
+    let now = std::time::Instant::now();
+    let colors = pane_infos
+        .iter()
+        .map(|info| {
+            border_color(
+                pane_agent_state(app, ws, info.id, now),
+                info.is_focused,
+                &app.palette,
+            )
+        })
+        .collect::<Vec<_>>();
+    // a cell no pane touches belongs to a split, which has no agent to speak for
+    let split_color = border_color(None, false, &app.palette);
+
     let buf = frame.buffer_mut();
     let area = buf.area;
     for ((x, y), line) in cells {
@@ -510,21 +528,20 @@ fn render_pane_borders(
         {
             continue;
         }
-        let focused = pane_infos
-            .iter()
-            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
         let symbol = line_cell_symbol(line);
         if symbol.is_empty() {
             continue;
         }
+        // a cell shared by two panes belongs to the focused one; where none is
+        // focused it takes the state of whichever pane it touches
+        let owner = pane_infos
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| line_touches_pane(x, y, info, app.pane_gaps))
+            .max_by_key(|(_, info)| info.is_focused);
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
-        cell.set_style(Style::default().fg(color));
+        cell.set_style(Style::default().fg(owner.map_or(split_color, |(idx, _)| colors[idx])));
     }
 
     render_pane_border_titles(app, ws, pane_infos, frame);
@@ -703,6 +720,72 @@ fn render_pane_border_titles(
             style,
         );
     }
+}
+
+/// The border, at the weight focus deserves. Colour says which agent wants you and
+/// brightness says which pane has your keyboard, so one channel carries both without
+/// either having to give way. It borrows the sidebar's colours rather than its own,
+/// because it is speaking about the same agent; a pane with nothing to report falls
+/// back to grey, and keeps the accent only while it holds the keyboard.
+///
+/// The accent also fills the tab chip, where it sits behind text and has to stay
+/// calm; a hairline on the terminal's own ground needs the opposite, so the step is
+/// taken here rather than by the palette. An ANSI colour is left alone — it is the
+/// terminal's, and blending it would overrule a choice made outside herdr.
+fn border_color(state: Option<(AgentState, bool)>, focused: bool, p: &Palette) -> Color {
+    // far enough to lose the argument with the focused edge, not so far that the
+    // pane stops having one: at 0.55 an unfocused border sat at 1.48:1 and vanished
+    const DIM: f32 = 0.25;
+
+    let Some(base) = state.and_then(|(state, seen)| super::status::attention_color(state, seen, p))
+    else {
+        // nothing to report, so nothing to report it in: the accent is worth spending
+        // on the pane holding the keyboard and on nothing else, or the edge that means
+        // least on the screen is the one drawn loudest
+        if focused {
+            return p.accent;
+        }
+        // an ANSI grey cannot be measured, and lifting one lands on plain white rather
+        // than anywhere near the tier it came from; only a concrete grey is lifted, and
+        // only where the theme pitches it below what an edge needs
+        let quiet = p.overlay0;
+        return match super::status::contrast_ratio(quiet, p.panel_bg) {
+            Some(ratio) if ratio < FAINTEST_BORDER => {
+                super::status::lift_until_legible(quiet, p.text, p.panel_bg, FAINTEST_BORDER)
+            }
+            _ => quiet,
+        };
+    };
+    // worn plain rather than lifted: the sidebar's bar for this agent is the same
+    // colour untouched, and one agent reading as two shades across two surfaces is the
+    // drift the shared table exists to stop. Focus still wins — the others are dimmed
+    if focused {
+        return base;
+    }
+    // a fixed step is only safe while every accent starts far from the ground: a pale
+    // one on a pale panel is erased by the same 25%, so walk back toward the undimmed
+    // colour until the edge reads again. Stopping at `base` keeps the focused edge louder
+    let dimmed = super::status::nudge_toward(base, super::status::ground_pole(p.panel_bg), DIM);
+    super::status::lift_until_legible(dimmed, base, p.panel_bg, FAINTEST_BORDER)
+}
+
+/// An unfocused pane still has edges; dimming one to 1.48:1 took them away.
+pub(super) const FAINTEST_BORDER: f32 = 1.8;
+
+/// The agent in a pane, where there is one to speak for.
+fn pane_agent_state(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    pane_id: crate::layout::PaneId,
+    now: std::time::Instant,
+) -> Option<(AgentState, bool)> {
+    let seen = ws.pane_state(pane_id)?.seen;
+    let terminal_id = ws.terminal_id(pane_id)?;
+    let terminal = app.terminals.get(terminal_id)?;
+    // a completion you just clicked keeps its colour for a moment, so the answer is
+    // seen to land rather than vanishing with the click
+    let held = app.within_acknowledged_hold(terminal_id, now);
+    Some((terminal.state, seen && !held))
 }
 
 fn line_cell_symbol(line: LineCell) -> &'static str {
@@ -1011,6 +1094,230 @@ mod tests {
     use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
 
+    const BORDER_STATES: [Option<(AgentState, bool)>; 5] = [
+        Some((AgentState::Blocked, true)),
+        Some((AgentState::Working, true)),
+        Some((AgentState::Idle, false)),
+        Some((AgentState::Idle, true)),
+        None,
+    ];
+
+    /// A resting edge is chrome, and chrome does not wear the accent unless it is the
+    /// one holding the keyboard: repainting the accent has to leave it exactly where it
+    /// was, or the quiet border is the accent again under another name. What a pane has
+    /// to report still outranks both.
+    #[test]
+    fn a_resting_unfocused_border_owes_nothing_to_the_accent() {
+        for name in crate::ui::status::THEME_NAMES {
+            let p = crate::app::state::Palette::from_name(name).expect("named theme resolves");
+            let mut repainted = p.clone();
+            repainted.accent = Color::Rgb(255, 0, 0);
+
+            assert_eq!(
+                border_color(None, false, &p),
+                border_color(None, false, &repainted),
+                "{name}: a resting unfocused border moved with the accent"
+            );
+            assert_eq!(
+                border_color(None, true, &repainted),
+                Color::Rgb(255, 0, 0),
+                "{name}: the focused pane stopped showing the accent"
+            );
+            assert_ne!(
+                border_color(Some((AgentState::Blocked, true)), false, &p),
+                border_color(None, false, &p),
+                "{name}: a blocked pane went as quiet as one with nothing to say"
+            );
+        }
+    }
+
+    /// An ANSI grey is the terminal's own. It cannot be measured against the panel, and
+    /// the lift that rescues a too-faint concrete grey lands on plain white when handed
+    /// one instead — which is what every resting border in the `terminal` theme became.
+    #[test]
+    fn an_ansi_resting_border_keeps_the_grey_the_terminal_chose() {
+        let p = crate::app::state::Palette::from_name("terminal").expect("named theme resolves");
+
+        assert!(
+            crate::ui::status::contrast_ratio(p.overlay0, p.panel_bg).is_none(),
+            "the terminal theme stopped using ANSI slots, so this no longer tests one"
+        );
+        assert_eq!(border_color(None, false, &p), p.overlay0);
+    }
+
+    /// The border now carries two facts at once, and the second must not cost the
+    /// first: whatever an agent is doing, the pane holding the keyboard still owns
+    /// the louder edge. Focus stopped being legible once, when the unfocused border
+    /// was set in `overlay0` — the tier text uses — against a deep accent.
+    #[test]
+    fn the_focused_pane_owns_the_louder_border_in_every_state() {
+        let mut compared = 0;
+
+        for name in crate::ui::status::THEME_NAMES {
+            let p = crate::app::state::Palette::from_name(name).expect("named theme resolves");
+            for state in BORDER_STATES {
+                let (Some(focused), Some(unfocused)) = (
+                    crate::ui::status::contrast_ratio(border_color(state, true, &p), p.panel_bg),
+                    crate::ui::status::contrast_ratio(border_color(state, false, &p), p.panel_bg),
+                ) else {
+                    continue;
+                };
+                compared += 1;
+                assert!(
+                    focused > unfocused,
+                    "{name}: focused {state:?} border is {focused:.2}:1 \
+                     against the unfocused {unfocused:.2}:1"
+                );
+                assert!(
+                    unfocused >= FAINTEST_BORDER,
+                    "{name}: unfocused {state:?} border is only {unfocused:.2}:1"
+                );
+            }
+        }
+
+        assert!(compared > 50, "only {compared} pairs were resolvable");
+    }
+
+    /// Clicking a row that says "finished, you missed it" answers it, and the answer
+    /// used to erase the question in the same frame: the border went from green to
+    /// Arriving from another space is where the mark matters most: you came for the
+    /// agent that finished, so the border has to still be wearing its colour when
+    /// you land rather than having been cleared by the switch itself.
+    #[test]
+    fn switching_into_a_finished_agent_keeps_its_colour_on_arrival() {
+        let mut app = AppState::test_new();
+        let elsewhere = Workspace::test_new("elsewhere");
+        let finished = Workspace::test_new("finished");
+        let pane_id = finished.tabs[0].root_pane;
+        app.workspaces = vec![elsewhere, finished];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.state = AgentState::Idle;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+
+        app.switch_workspace(1);
+
+        assert_eq!(
+            pane_agent_state(&app, &app.workspaces[1], pane_id, std::time::Instant::now()),
+            Some((AgentState::Idle, false)),
+            "still wearing the colour that brought you here"
+        );
+        assert_eq!(
+            pane_agent_state(
+                &app,
+                &app.workspaces[1],
+                pane_id,
+                std::time::Instant::now() + AppState::ACKNOWLEDGED_HOLD
+            ),
+            Some((AgentState::Idle, true)),
+            "and it lets go once you have had time to see it"
+        );
+    }
+
+    /// Typing into the pane is the acknowledgement that really counts, so the mark
+    /// goes then rather than sitting there while you work.
+    #[test]
+    fn typing_into_a_pane_lets_go_of_its_held_colour() {
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.state = AgentState::Idle;
+        assert!(app.hold_acknowledged(vec![terminal_id.clone()]));
+        assert!(app.within_acknowledged_hold(&terminal_id, std::time::Instant::now()));
+
+        assert!(app.release_acknowledged_hold(0, pane_id));
+
+        assert!(!app.within_acknowledged_hold(&terminal_id, std::time::Instant::now()));
+        assert!(app.next_acknowledged_hold_expiry().is_none());
+    }
+
+    /// the plain accent between one render and the next, so the two never read as the
+    /// same event. The colour is held briefly instead.
+    #[test]
+    fn a_completion_keeps_its_colour_for_a_moment_after_it_is_acknowledged() {
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.state = AgentState::Idle;
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+
+        let state_at = |app: &AppState, now: std::time::Instant| {
+            pane_agent_state(app, &app.workspaces[0], pane_id, now)
+        };
+
+        assert_eq!(
+            state_at(&app, std::time::Instant::now()),
+            Some((AgentState::Idle, false)),
+            "unseen before it is looked at"
+        );
+
+        assert!(app.mark_active_tab_seen());
+
+        assert_eq!(
+            state_at(&app, std::time::Instant::now()),
+            Some((AgentState::Idle, false)),
+            "still wearing the colour it was clicked in"
+        );
+        // and the loop is told to come back and repaint when the hold runs out
+        assert!(app.next_acknowledged_hold_expiry().is_some());
+
+        // which it does by dropping the hold: a deadline the loop keeps asking for but
+        // nothing ever clears stays in the past and spins it
+        let expired = std::time::Instant::now() + AppState::ACKNOWLEDGED_HOLD;
+        assert!(app.expire_acknowledged_holds(expired));
+        assert!(app.next_acknowledged_hold_expiry().is_none());
+        // and the row stops claiming to want you
+        assert_eq!(state_at(&app, expired), Some((AgentState::Idle, true)));
+    }
+
+    /// Colour is what the border says, so two states sharing one erases a distinction
+    /// silently — the same failure the sidebar's marks are held to.
+    #[test]
+    fn no_two_border_states_share_a_colour() {
+        for name in crate::ui::status::THEME_NAMES {
+            let p = crate::app::state::Palette::from_name(name).expect("named theme resolves");
+            // settled and agentless both mean "nothing to report" and share on purpose
+            let distinct = [BORDER_STATES[0], BORDER_STATES[1], BORDER_STATES[2]]
+                .map(|state| border_color(state, true, &p));
+
+            for (first, second) in [(0, 1), (0, 2), (1, 2)] {
+                assert_ne!(
+                    distinct[first], distinct[second],
+                    "{name}: border states {first} and {second} share a colour"
+                );
+            }
+        }
+    }
+
     fn render_view_pane_borders(app: &AppState, ws: &Workspace, frame: &mut Frame) {
         render_pane_borders(
             app,
@@ -1272,9 +1579,15 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 2)].symbol(), "┼");
-        assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
+        assert_eq!(
+            buffer[(2, 2)].style().fg,
+            Some(border_color(None, true, &app.palette))
+        );
         assert_eq!(buffer[(2, 1)].symbol(), "│");
-        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
+        assert_eq!(
+            buffer[(2, 1)].style().fg,
+            Some(border_color(None, true, &app.palette))
+        );
     }
 
     #[test]
@@ -1310,8 +1623,14 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
-        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
+        assert_eq!(
+            buffer[(1, 1)].style().fg,
+            Some(border_color(None, true, &app.palette))
+        );
+        assert_eq!(
+            buffer[(2, 1)].style().fg,
+            Some(border_color(None, false, &app.palette))
+        );
     }
 
     #[tokio::test]
@@ -1339,7 +1658,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
     }
 
     #[tokio::test]
@@ -1358,6 +1677,9 @@ mod tests {
         );
         app.workspaces = vec![workspace];
         app.active = Some(0);
+        // the gutter is what this measures, and a lone pane now keeps a border that
+        // would otherwise be counted into every figure below
+        app.pane_outer_borders = false;
 
         let area = Rect::new(10, 3, 40, 8);
         let terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -1413,7 +1735,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
     }
 
     #[tokio::test]
@@ -1471,7 +1793,8 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, area);
+        // the border takes one column on each side before the gutter is even asked for
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 2, 6));
     }
 
     #[tokio::test]
@@ -1490,6 +1813,9 @@ mod tests {
         );
         app.workspaces = vec![workspace];
         app.active = Some(0);
+        // the reserved column is what this measures, and a lone pane now keeps a
+        // border that would otherwise be counted into every figure below
+        app.pane_outer_borders = false;
 
         let area = Rect::new(10, 3, 40, 8);
         let terminal_runtimes = TerminalRuntimeRegistry::new();

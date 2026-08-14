@@ -1539,6 +1539,10 @@ pub struct AppState {
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     pub sidebar_position: crate::config::SidebarPositionConfig,
+    /// When a pane's completion was last acknowledged by looking at it. The mark that
+    /// said "finished, you missed it" would otherwise vanish in the same frame as the
+    /// click that answered it, and the two would never be seen as the same thing.
+    pub acknowledged_at: std::collections::HashMap<crate::terminal::TerminalId, std::time::Instant>,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1611,6 +1615,41 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// How long a completion keeps its colour after you get to it. Long enough to
+    /// survive arriving in a space and reading where you landed; typing into the
+    /// pane drops it earlier, which is the acknowledgement that really counts.
+    pub(crate) const ACKNOWLEDGED_HOLD: std::time::Duration = std::time::Duration::from_secs(8);
+
+    /// Whether this pane's completion is still within the window where it keeps the
+    /// colour it had when you clicked it.
+    pub(crate) fn within_acknowledged_hold(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+        now: std::time::Instant,
+    ) -> bool {
+        self.acknowledged_at
+            .get(terminal_id)
+            .is_some_and(|at| now.duration_since(*at) < Self::ACKNOWLEDGED_HOLD)
+    }
+
+    /// When the earliest hold runs out, so the loop repaints the moment it does.
+    pub(crate) fn next_acknowledged_hold_expiry(&self) -> Option<std::time::Instant> {
+        self.acknowledged_at
+            .values()
+            .map(|at| *at + Self::ACKNOWLEDGED_HOLD)
+            .min()
+    }
+
+    /// Drops the holds that have run out, so the row stops claiming to want you.
+    /// Returns whether anything expired: a deadline the loop keeps asking for but
+    /// nothing ever clears stays in the past and spins it.
+    pub(crate) fn expire_acknowledged_holds(&mut self, now: std::time::Instant) -> bool {
+        let before = self.acknowledged_at.len();
+        self.acknowledged_at
+            .retain(|_, at| now.duration_since(*at) < Self::ACKNOWLEDGED_HOLD);
+        self.acknowledged_at.len() != before
+    }
+
     /// Advance the sidebar's working indicator. Returns whether the frame moved, so
     /// a sidebar with nothing running costs no redraws at all.
     pub(crate) fn tick_agent_spinner(&mut self, now: std::time::Instant) -> bool {
@@ -1934,6 +1973,7 @@ impl AppState {
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             sidebar_position: crate::config::SidebarPositionConfig::default(),
+            acknowledged_at: std::collections::HashMap::new(),
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,

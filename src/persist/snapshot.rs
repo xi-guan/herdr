@@ -853,7 +853,7 @@ mod tests {
         let mut state = state_with_workspaces(&["one"]);
         state.workspaces[0].set_custom_name("renamed-workspace".into());
         let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
-        state.workspaces[0].switch_tab(second_tab);
+        let _ = state.workspaces[0].switch_tab(second_tab);
         state.workspaces[0].tabs[0].set_custom_name("main".into());
 
         let snapshot = capture_from_state(&state);

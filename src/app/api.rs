@@ -1902,7 +1902,7 @@ mod tests {
         let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
         workspace.tabs[0].zoomed = true;
         let new_tab = workspace.test_add_tab(Some("new"));
-        workspace.switch_tab(new_tab);
+        let _ = workspace.switch_tab(new_tab);
         let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, true);
 
         app.handle_internal_event(AppEvent::PaneDied {

@@ -193,6 +193,11 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
     }
 }
 
+/// The braille spinner, in the filled variant: one cell wide, which is the only
+/// width a terminal can turn something in, and seven of the eight dots lit rather
+/// than three. The sparse variant turns just as well but carries a third of the ink
+/// of the `●` its neighbours are drawn with, so the busiest row read as the faintest.
+const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 /// Two stacked braille cells are a 2x8 dot grid; a short comet walking its
 /// perimeter turns without ever leaving the one column the indicator owns. Every
@@ -201,6 +206,11 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
 const RING_LEFT: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
 const RING_RIGHT: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
 const RING_STEPS: u64 = 18;
+/// Near half the loop rather than a sixth. Every other state fills the column with a
+/// solid bar, so a short comet made the one state you want to notice the palest mark in
+/// the sidebar. The ceiling is the bar it must not become: much past this the unlit
+/// stretch closes up and a turning agent starts reading as a blocked one.
+const RING_COMET: u64 = 8;
 
 /// Which columns the comet lights at each step, and how far down it is. The two
 /// steps that light both columns are the top and bottom of the loop: without them
@@ -241,6 +251,10 @@ pub(super) fn agent_state_cells(
     p: &Palette,
 ) -> ([String; 2], Style) {
     let (glyph, style) = state_dot(state, seen, p);
+    if matches!(state, AgentState::Working) {
+        return (ring_cells(frame), style);
+    }
+    let cells = if glyph == "○" {
         ["\u{2502}".to_string(), "\u{2502}".to_string()]
     } else {
         // box-drawing verticals join across the row boundary into one unbroken line,
@@ -264,21 +278,115 @@ pub(super) fn agent_state_icon(
     (glyph, style)
 }
 
-    const STEPS: u8 = 8;
-
-    };
-    for step in 0..=STEPS {
-            return candidate;
-        }
+/// The pole a colour recedes toward on `background` — the opposite of the one it
+/// gains contrast from, so the same call dims on a dark ground and on a light one.
+pub(super) fn ground_pole(background: Color) -> Color {
+    match ink_pole(background) {
+        Color::White => Color::Black,
+        _ => Color::White,
     }
 }
 
+/// Pushes a colour a fixed part of the way toward `pole`. Only a concrete colour
+/// moves: an ANSI slot belongs to the terminal, and blending it would overrule a
+/// choice made outside herdr.
+pub(super) fn nudge_toward(color: Color, pole: Color, part: f32) -> Color {
+    let (Color::Rgb(r, g, b), Some(pole)) = (color, resolve_rgb(pole)) else {
+        return color;
+    };
+    let mix = |from: u8, to: u8| {
+        (f32::from(from) + (f32::from(to) - f32::from(from)) * part).round() as u8
+    };
+    Color::Rgb(mix(r, pole.0), mix(g, pole.1), mix(b, pole.2))
+}
+
+/// Whichever of black or white a colour can be pushed toward to gain contrast on
+/// `background`. Unresolvable backgrounds answer white, which is right for the dark
+/// terminals that leave their colours unstated and harmless where it is not.
+pub(super) fn ink_pole(background: Color) -> Color {
+    let against = |ink: Color| contrast_ratio(ink, background).unwrap_or(0.0);
+    if against(Color::White) >= against(Color::Black) {
+        Color::White
+    } else {
+        Color::Black
+    }
+}
+
+/// The quietest point between two tiers that still reads on `background`. Adjacent
+/// palette tiers sit close together in any well-built theme, so picking one by hand
+/// works in the theme you happen to be running and fails in the next; walking from
+/// the quiet tier toward the legible one and stopping at the floor holds everywhere.
+///
+/// Falls back to `toward` when either end is a colour the terminal owns, since then
+/// there is no ratio to walk by.
+pub(super) fn lift_until_legible(
+    quiet: Color,
+    toward: Color,
+    background: Color,
+    floor: f32,
+) -> Color {
+    const STEPS: u8 = 8;
+
+    let (Some((r, g, b)), Some(_)) = (resolve_rgb(quiet), resolve_rgb(toward)) else {
+        return toward;
+    };
+    let quiet = Color::Rgb(r, g, b);
+    for step in 0..=STEPS {
+        let candidate = nudge_toward(quiet, toward, f32::from(step) / f32::from(STEPS));
+        if contrast_ratio(candidate, background).is_none_or(|ratio| ratio >= floor) {
+            return candidate;
+        }
+    }
+    toward
+}
+
+/// The dimmest colour that still reads on the focused row's fill.
+fn settled_mark(p: &Palette) -> Color {
+    lift_until_legible(p.surface1, p.overlay0, p.surface_dim, 1.6)
+}
+
+/// The colour an agent claiming your attention wears, wherever it is drawn — the
+/// sidebar's dot and the pane's own border say the same thing, and two tables for one
+/// fact drift apart silently. `None` is an agent with nothing to report; what that
+/// looks like is up to the surface drawing it.
+pub(super) fn attention_color(state: AgentState, seen: bool, p: &Palette) -> Option<Color> {
+    match (state, seen) {
+        (AgentState::Blocked, _) => Some(p.red),
         // the agents themselves signal work in this tier, and a row that disagrees
         // with the pane it points at reads as two different things happening
+        (AgentState::Working, _) => Some(p.peach),
         // one axis: colour means the row wants you, grey means it is done wanting you.
         // `seen` is false when the agent finished while you were looking elsewhere,
         // which is the completion you still have to read.
+        (AgentState::Idle, false) => Some(p.green),
+        _ => None,
+    }
+}
+
+/// The colour an agent's indicator wears on every surface that draws one. The glyph
+/// is the surface's own business — the sidebar animates, the navigator obeys
+/// `ui.status_indicator_style` — but one agent reading as two colours across two
+/// panels is the drift a single table exists to stop.
+pub(super) fn agent_state_color(state: AgentState, seen: bool, p: &Palette) -> Color {
+    attention_color(state, seen, p).unwrap_or(match state {
+        AgentState::Unknown => p.overlay0,
+        _ => settled_mark(p),
+    })
+}
+
+pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
+    let glyph = match (attention_color(state, seen, p), state) {
+        (Some(_), _) => "●",
         // a dash reads as "no agent here" at a glance; a middle dot disappears
+        (None, AgentState::Unknown) => "–",
+        (None, _) => "○",
+    };
+    (
+        glyph,
+        Style::default().fg(agent_state_color(state, seen, p)),
+    )
+}
+
 pub(super) fn state_icon_symbol(
     state: AgentState,
     seen: bool,
@@ -306,7 +414,7 @@ pub(super) fn state_icon(
 ) -> (&'static str, Style) {
     (
         state_icon_symbol(state, seen, indicator_style),
-        Style::default().fg(state_label_color(state, seen, p)),
+        Style::default().fg(agent_state_color(state, seen, p)),
     )
 }
 
@@ -565,11 +673,13 @@ mod tests {
             (StatusIndicatorStyle::Dots, ["●", "●", "●", "○", "·"]),
             (StatusIndicatorStyle::Symbols, ["×", "◐", "✓", "○", "·"]),
         ] {
+            // the indicator style names the glyph; the colour comes from the one table
+            // every surface shares, so this agent looks the same here and on its border
             for ((state, seen, color), expected_symbol) in [
                 (AgentState::Blocked, true, palette.red),
-                (AgentState::Working, true, palette.yellow),
-                (AgentState::Idle, false, palette.teal),
-                (AgentState::Idle, true, palette.green),
+                (AgentState::Working, true, palette.peach),
+                (AgentState::Idle, false, palette.green),
+                (AgentState::Idle, true, settled_mark(&palette)),
                 (AgentState::Unknown, true, palette.overlay0),
             ]
             .into_iter()

@@ -501,15 +501,26 @@ impl Workspace {
         )
     }
 
-    pub fn switch_tab(&mut self, idx: usize) {
-        if idx < self.tabs.len() {
-            self.active_tab = idx;
-            if let Some(tab) = self.tabs.get_mut(idx) {
-                for pane in tab.panes.values_mut() {
-                    pane.seen = true;
-                }
-            }
+    /// Switches to the tab and answers with the panes that were still unseen.
+    /// The caller holds their colour for a moment: arriving at a finished agent
+    /// is exactly when you need to be told which one it was.
+    #[must_use]
+    pub fn switch_tab(&mut self, idx: usize) -> Vec<crate::terminal::TerminalId> {
+        if idx >= self.tabs.len() {
+            return Vec::new();
         }
+        self.active_tab = idx;
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return Vec::new();
+        };
+        tab.panes
+            .values_mut()
+            .filter(|pane| !pane.seen)
+            .map(|pane| {
+                pane.seen = true;
+                pane.attached_terminal_id.clone()
+            })
+            .collect()
     }
 
     pub fn create_tab(
@@ -1363,7 +1374,7 @@ impl Workspace {
         let final_root = ws.tabs[final_tab].root_pane;
         assert!(ws.close_tab(removed_tab));
         assert!(ws.move_tab(0, ws.tabs.len()));
-        ws.switch_tab(
+        let _ = ws.switch_tab(
             ws.find_tab_index_for_pane(survivor_root)
                 .expect("survivor tab should still exist"),
         );
@@ -1793,7 +1804,7 @@ mod tests {
         ws.test_add_tab(Some("foo"));
         let final_auto_idx = ws.test_add_tab(None);
         let active_root = ws.tabs[final_auto_idx].root_pane;
-        ws.switch_tab(final_auto_idx);
+        let _ = ws.switch_tab(final_auto_idx);
 
         assert!(ws.move_tab(0, ws.tabs.len()));
 

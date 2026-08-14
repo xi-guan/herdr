@@ -1037,8 +1037,8 @@ mod tests {
         let one_tab_size = app.workspaces[0].tabs[0].runtimes[&one_tab_pane].current_size();
         let two_tab_size =
             app.workspaces[1].tabs[background_tab].runtimes[&two_tab_pane].current_size();
-        assert_eq!(one_tab_size, (20, 53));
-        assert_eq!(two_tab_size, (19, 53));
+        assert_eq!(one_tab_size, (18, 51));
+        assert_eq!(two_tab_size, (17, 51));
     }
 
     #[tokio::test]
@@ -1064,7 +1064,7 @@ mod tests {
         assert_eq!(app.view.terminal_area, Rect::new(0, 2, 44, 18));
         assert_eq!(
             app.workspaces[0].tabs[background_tab].runtimes[&background_pane].current_size(),
-            (18, 43)
+            (16, 41)
         );
     }
 
@@ -1280,7 +1280,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let custom_tab = ws.test_add_tab(Some("logs"));
-        ws.switch_tab(custom_tab);
+        let _ = ws.switch_tab(custom_tab);
 
         app.workspaces = vec![ws];
         app.active = Some(0);
@@ -1318,7 +1318,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let custom_tab = ws.test_add_tab(Some("logs"));
-        ws.switch_tab(custom_tab);
+        let _ = ws.switch_tab(custom_tab);
 
         app.palette.panel_bg = Color::Reset;
         app.workspaces = vec![ws];
@@ -1480,7 +1480,9 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 40, 12));
 
         let info = app.view.pane_infos.first().expect("pane info");
-        assert_eq!(info.inner_rect.width + 1, app.view.terminal_area.width);
+        // the gutter takes one column from what the pane has, whatever chrome it wears
+        let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
+        assert_eq!(info.inner_rect.width + 1, pane_inner.width);
         assert_eq!(
             info.scrollbar_rect,
             Some(Rect::new(

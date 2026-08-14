@@ -811,8 +811,13 @@ const SELECTION_MARK_WIDTH: u16 = 1;
 /// which every other line in the sidebar has no part in.
 const SELECTION_MARK: &str = "┃";
 
+/// The rule marking the focused row. It wears the accent unmodified, exactly as the
+/// focused pane's border does, because the two say the same thing and any lift toward
+/// legibility washes the hue out until they no longer read as one signal. The fill
+/// stays under it: taking it away leaves a notch and the row stops reading as
 /// selected at all.
 fn selection_mark_style(p: &Palette, fill: ratatui::style::Color) -> Style {
+    Style::default().fg(p.accent).bg(fill)
 }
 
 /// A one-cell fill reads as a hairline, not as a selected row, so an agent with
@@ -1116,7 +1121,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             break;
         }
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-        let (icon, icon_style) = state_icon(agg_state, agg_seen, app.status_indicators, p);
+        let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
         let row_style = if is_selected {
@@ -3210,13 +3215,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             buffer[(workspace_area.x + 1, workspace_area.y)].symbol(),
             " "
         );
+        // a dash rather than the indicator style's middle dot: this column says "no
+        // agent here", and a middle dot disappears against the digits beside it
         assert_eq!(
             buffer[(workspace_area.x + 2, workspace_area.y)].symbol(),
-            "·"
+            "–"
         );
         assert_eq!(buffer[(workspace_area.x, tenth_row)].symbol(), "1");
         assert_eq!(buffer[(workspace_area.x + 1, tenth_row)].symbol(), "0");
-        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "·");
+        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "–");
     }
 
     #[test]
@@ -3298,15 +3305,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
         assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
         assert_eq!(buffer[(detail_area.x, detail_area.y + 2)].symbol(), "3");
-        assert_eq!(buffer[(detail_area.x + 2, detail_area.y)].symbol(), "×");
+        // the agent rows carry the same dot and the same colour the pane border does,
+        // so the indicator style names the glyph everywhere except here
+        assert_eq!(buffer[(detail_area.x + 2, detail_area.y)].symbol(), "●");
         assert_eq!(
             buffer[(detail_area.x + 2, detail_area.y)].style().fg,
             Some(app.palette.red)
         );
-        assert_eq!(buffer[(detail_area.x + 2, detail_area.y + 1)].symbol(), "✓");
+        assert_eq!(buffer[(detail_area.x + 2, detail_area.y + 1)].symbol(), "●");
         assert_eq!(
             buffer[(detail_area.x + 2, detail_area.y + 1)].style().fg,
-            Some(app.palette.teal)
+            Some(app.palette.green)
         );
     }
 

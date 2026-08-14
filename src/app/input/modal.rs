@@ -2076,7 +2076,7 @@ mod tests {
     fn open_rename_active_tab_can_prefill_default_new_tab_name() {
         let mut state = state_with_workspaces(&["test"]);
         state.workspaces[0].test_add_tab(None);
-        state.workspaces[0].switch_tab(1);
+        let _ = state.workspaces[0].switch_tab(1);
 
         open_rename_active_tab(&mut state, true);
 
@@ -2150,7 +2150,7 @@ mod tests {
         state.requested_new_tab_name = None;
 
         state.workspaces[0].close_tab(0);
-        state.workspaces[0].switch_tab(0);
+        let _ = state.workspaces[0].switch_tab(0);
 
         assert_eq!(
             state.workspaces[0].tab_display_name(0).as_deref(),
@@ -2166,7 +2166,7 @@ mod tests {
     fn renaming_auto_tab_to_its_default_number_keeps_it_auto_named() {
         let mut state = state_with_workspaces(&["test"]);
         state.workspaces[0].test_add_tab(None);
-        state.workspaces[0].switch_tab(1);
+        let _ = state.workspaces[0].switch_tab(1);
 
         open_rename_active_tab(&mut state, false);
         handle_rename_key(

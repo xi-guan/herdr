@@ -34,7 +34,7 @@ pub(super) fn render_panel_shell(
 /// the fill only works when the two happen to differ — on a dark accent with a dark
 /// panel it produces text that is technically drawn and practically invisible.
 pub(super) fn panel_contrast_fg(p: &Palette) -> Color {
-    }
+    super::status::ink_pole(p.accent)
 }
 
 pub(crate) fn centered_popup_rect(area: Rect, popup_w: u16, popup_h: u16) -> Option<Rect> {
