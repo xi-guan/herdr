@@ -540,6 +540,7 @@ fn restore_tab(
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_terminal_title = saved_pane.and_then(|p| p.terminal_title.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
         let saved_history =
@@ -595,6 +596,7 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.terminal_title = saved_terminal_title;
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -690,6 +692,7 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                terminal.terminal_title = saved_terminal_title;
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1556,6 +1559,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            terminal_title: Some("✳ 审视单选题翻译质量".into()),
                         },
                     )]),
                     zoomed: false,
@@ -1596,6 +1600,10 @@ mod tests {
         );
         assert_eq!(terminal.agent_name, None);
         assert_eq!(terminal.manual_label.as_deref(), Some("reviewer"));
+        assert_eq!(
+            terminal.terminal_title.as_deref(),
+            Some("✳ 审视单选题翻译质量")
+        );
         let session = terminal
             .persisted_agent_session
             .as_ref()
@@ -1638,6 +1646,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                terminal_title: None,
                             },
                         ),
                         (
@@ -1650,6 +1659,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                terminal_title: None,
                             },
                         ),
                     ]),
@@ -1704,6 +1714,7 @@ mod tests {
                     agent_session: None,
                     agent_resume: None,
                     launch_argv: None,
+                    terminal_title: None,
                 },
             )
         };
@@ -1720,6 +1731,7 @@ mod tests {
             }),
             agent_resume: None,
             launch_argv: None,
+            terminal_title: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1872,6 +1884,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            terminal_title: None,
                         },
                     )]),
                     zoomed: false,
@@ -2178,6 +2191,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                terminal_title: None,
             },
         );
         let mut history = SessionHistorySnapshot {
