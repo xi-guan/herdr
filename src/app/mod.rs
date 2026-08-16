@@ -891,6 +891,7 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        app.sync_restored_terminal_titles();
         Ok(app)
     }
 

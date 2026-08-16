@@ -33,6 +33,20 @@ impl App {
         changes
     }
 
+    /// Pulls every restored pane's title out of its runtime once. Handoff seeds the
+    /// runtime tracker directly, so no pty write marks these panes dirty and the
+    /// title would stay blank until the agent emitted a *different* one.
+    pub(crate) fn sync_restored_terminal_titles(&mut self) -> TerminalTitleChanges {
+        let restored: HashSet<PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect();
+        self.sync_terminal_titles(&restored)
+    }
+
     pub(crate) fn sync_terminal_titles(
         &mut self,
         sources: &HashSet<PaneId>,
@@ -155,6 +169,34 @@ mod tests {
         assert_eq!(pane.terminal_title_stripped, None);
         assert_eq!(pane.revision, 3);
         assert_eq!(pane_updated_events(&event_hub), 3);
+    }
+
+    #[tokio::test]
+    async fn restored_titles_reach_app_state_without_a_pty_write() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        // stands in for the handoff seed: the runtime knows the title, app state does not
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes("\x1b]2;✳ 审视单选题翻译质量\x1b\\".as_bytes());
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        assert_eq!(app.pane_info(0, pane_id).unwrap().terminal_title, None);
+
+        assert!(app.sync_restored_terminal_titles().stripped_changed);
+
+        let pane = app.pane_info(0, pane_id).unwrap();
+        assert_eq!(pane.terminal_title.as_deref(), Some("✳ 审视单选题翻译质量"));
+        assert_eq!(
+            pane.terminal_title_stripped.as_deref(),
+            Some("审视单选题翻译质量")
+        );
     }
 
     #[tokio::test]
