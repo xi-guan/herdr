@@ -168,18 +168,19 @@ pub(crate) fn render_pane_scrollbar_buffer(
     palette: &crate::app::state::Palette,
     focused: bool,
 ) {
-    let (track_color, thumb_color, thumb_symbol) = if focused {
-        (palette.overlay0, palette.overlay1, "▐")
+    // thin and capped at overlay0 so it never outshouts the pane; unfocused drops a tier
+    let thumb_color = if focused {
+        palette.overlay0
     } else {
-        (palette.surface_dim, palette.overlay0, "▕")
+        palette.surface1
     };
     render_scrollbar_buffer(
         buffer,
         metrics,
         track,
-        track_color,
+        palette.surface_dim,
         thumb_color,
-        thumb_symbol,
+        "▕",
     );
 }
 
