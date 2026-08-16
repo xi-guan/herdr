@@ -130,6 +130,10 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Raw OSC 0/2 title. Only the agent re-emits it, so without this a restored
+    /// pane shows no title until it next changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +393,7 @@ fn capture_tab(
                     value: session.session_ref.value.clone(),
                 })
         });
+        let terminal_title = terminal.and_then(|terminal| terminal.terminal_title.clone());
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -398,6 +403,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 launch_argv,
+                terminal_title,
             },
         );
     }
@@ -679,6 +685,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                terminal_title: None,
             },
         );
         panes.insert(
@@ -690,6 +697,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                terminal_title: None,
             },
         );
 
@@ -1155,6 +1163,29 @@ mod tests {
     }
 
     #[test]
+    fn capture_keeps_the_terminal_title_and_survives_a_json_roundtrip() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_terminal_title(Some("✳ 审视单选题翻译质量".into()));
+
+        let snapshot = capture_from_state(&state);
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let reloaded: SessionSnapshot = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            reloaded.workspaces[0].tabs[0].panes[&root.raw()]
+                .terminal_title
+                .as_deref(),
+            Some("✳ 审视单选题翻译质量")
+        );
+    }
+
+    #[test]
     fn capture_contract_tracks_hook_authority_agent_session() {
         let mut state = state_with_workspaces(&["one"]);
         let session_path = test_session_path("pi-session.jsonl");
@@ -1262,6 +1293,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                terminal_title: None,
             },
         );
         panes.insert(
@@ -1275,6 +1307,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                terminal_title: None,
             },
         );
 
