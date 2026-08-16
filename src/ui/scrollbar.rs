@@ -174,18 +174,20 @@ pub(super) fn render_pane_scrollbar(
         return;
     };
 
-    let (track_color, thumb_color, thumb_symbol) = if info.is_focused {
-        (app.palette.overlay0, app.palette.overlay1, "▐")
+    // every other scrollbar in the app is thin and tops out at overlay0; a focused
+    // pane matches them and an unfocused one drops its thumb a tier to recede
+    let thumb_color = if info.is_focused {
+        app.palette.overlay0
     } else {
-        (app.palette.surface_dim, app.palette.overlay0, "▕")
+        app.palette.surface1
     };
 
     render_scrollbar(
         frame,
         metrics,
         track,
-        track_color,
+        app.palette.surface_dim,
         thumb_color,
-        thumb_symbol,
+        "▕",
     );
 }
