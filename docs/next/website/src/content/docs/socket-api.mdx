@@ -813,8 +813,14 @@ Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
 that workspace.
 Pane event subscriptions include `pane.created`, `pane.updated`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
-`pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
+`pane.output_matched`, `pane.agent_status_changed`, `pane.output_changed`, and `pane.scroll_changed`.
 Terminal-title changes can emit `pane.updated`, but spinner-only raw-title changes do not emit it when `terminal_title_stripped` is unchanged.
+`pane.agent_status_changed` and `pane.output_changed` take an optional `pane_id`;
+omit it to watch every pane. `pane.output_changed` emits `pane_id`, `workspace_id`,
+and the pane's `content_revision` whenever that revision moves, so a client that
+renders pane content can redraw without polling. Each tick emits at most one such
+event, taking panes in turn, so one busy pane cannot starve the others; a burst
+between ticks arrives as a single event carrying the latest revision.
 `pane.scroll_changed` is scoped to one `pane_id` and emits `pane_id`,
 `workspace_id`, and the current `scroll` metrics whenever Herdr observes a
 changed scroll snapshot.

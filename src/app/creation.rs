@@ -516,9 +516,10 @@ impl App {
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        let scroll = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+        let runtime =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
+        let scroll = runtime
             .and_then(|runtime| runtime.scroll_metrics())
             .map(|metrics| crate::api::schema::PaneScrollInfo {
                 offset_from_bottom: metrics.offset_from_bottom as u64,
@@ -555,6 +556,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             revision: terminal.revision,
+            content_revision: runtime.map(|runtime| runtime.content_seq()).unwrap_or(0),
         })
     }
 

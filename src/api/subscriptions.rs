@@ -1,9 +1,9 @@
 use regex::Regex;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputMatchedEvent,
-    PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription, SubscriptionEventData,
-    SubscriptionEventEnvelope, SubscriptionEventKind,
+    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputChangedEvent,
+    PaneOutputMatchedEvent, PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription,
+    SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
 };
 use crate::api::server::{dispatch_to_app_with_timeout, APP_RESPONSE_TIMEOUT};
 use crate::api::{ApiRequestSender, EventHub};
@@ -62,6 +62,15 @@ pub(super) struct ActiveScrollChangedSubscription {
     request_prefix: String,
 }
 
+pub(super) struct ActiveOutputChangedSubscription {
+    /// None = every pane on the server
+    pane_id: Option<String>,
+    last: std::collections::BTreeMap<String, u64>,
+    /// round-robin cursor so one busy pane cannot starve the rest
+    last_emitted: Option<String>,
+    request_prefix: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanePresentationSnapshot {
     title: Option<String>,
@@ -101,6 +110,7 @@ pub(super) enum ActiveSubscription {
     OutputMatched(ActiveOutputMatchedSubscription),
     AgentStatusChanged(Box<ActiveAgentStatusChangedSubscription>),
     ScrollChanged(ActiveScrollChangedSubscription),
+    OutputChanged(ActiveOutputChangedSubscription),
 }
 
 impl ActiveSubscription {
@@ -253,7 +263,25 @@ impl ActiveSubscription {
                 }))
             }
             Subscription::PaneAgentStatusChanged {
-                pane_id,
+                pane_id: None,
+                agent_status,
+            } => {
+                if agent_status.is_some() {
+                    return Err(ErrorResponse {
+                        id: request_id.to_string(),
+                        error: ErrorBody {
+                            code: "invalid_params".into(),
+                            message: "agent_status filter requires pane_id".into(),
+                        },
+                    });
+                }
+                Ok(Self::Event(ActiveEventSubscription {
+                    event_kind: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                    last_sequence: 0,
+                }))
+            }
+            Subscription::PaneAgentStatusChanged {
+                pane_id: Some(pane_id),
                 agent_status,
             } => {
                 let last_sequence = event_hub.current_sequence();
@@ -293,6 +321,27 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
+            Subscription::PaneOutputChanged { pane_id } => {
+                let request_prefix = format!("{request_id}:sub:{index}");
+                let mut last = std::collections::BTreeMap::new();
+                match &pane_id {
+                    Some(pane_id) => {
+                        let probe = pane_get(format!("{request_prefix}:probe"), pane_id, api_tx)?;
+                        last.insert(probe.pane_id, probe.content_revision);
+                    }
+                    None => {
+                        for pane in pane_list(format!("{request_prefix}:probe"), api_tx)? {
+                            last.insert(pane.pane_id, pane.content_revision);
+                        }
+                    }
+                }
+                Ok(Self::OutputChanged(ActiveOutputChangedSubscription {
+                    pane_id,
+                    last,
+                    last_emitted: None,
+                    request_prefix,
+                }))
+            }
         }
     }
 
@@ -310,6 +359,9 @@ impl ActiveSubscription {
                 serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
             }
             Self::ScrollChanged(subscription) => {
+                serde_json::to_value(subscription.poll(api_tx)?).ok()
+            }
+            Self::OutputChanged(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx)?).ok()
             }
         }
@@ -540,6 +592,58 @@ impl ActiveScrollChangedSubscription {
     }
 }
 
+impl ActiveOutputChangedSubscription {
+    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
+        let panes = match &self.pane_id {
+            Some(pane_id) => {
+                vec![pane_get(format!("{}:pane", self.request_prefix), pane_id, api_tx).ok()?]
+            }
+            None => pane_list(format!("{}:panes", self.request_prefix), api_tx).ok()?,
+        };
+        self.event_from_snapshot(&panes)
+    }
+
+    /// At most one event per tick. A pane's stored revision only advances when its
+    /// event is emitted, so bursts coalesce into one event at the latest revision.
+    fn event_from_snapshot(
+        &mut self,
+        panes: &[crate::api::schema::PaneInfo],
+    ) -> Option<SubscriptionEventEnvelope> {
+        let mut changed: Vec<&crate::api::schema::PaneInfo> = Vec::new();
+        for pane in panes {
+            match self.last.get(&pane.pane_id) {
+                Some(last) if *last != pane.content_revision => changed.push(pane),
+                Some(_) => {}
+                // a pane first seen mid-subscription baselines silently
+                None => {
+                    self.last
+                        .insert(pane.pane_id.clone(), pane.content_revision);
+                }
+            }
+        }
+        self.last
+            .retain(|pane_id, _| panes.iter().any(|pane| &pane.pane_id == pane_id));
+
+        changed.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
+        let pick = changed
+            .iter()
+            .find(|pane| Some(&pane.pane_id) > self.last_emitted.as_ref())
+            .or_else(|| changed.first())?;
+
+        self.last
+            .insert(pick.pane_id.clone(), pick.content_revision);
+        self.last_emitted = Some(pick.pane_id.clone());
+        Some(SubscriptionEventEnvelope {
+            event: SubscriptionEventKind::OutputChanged,
+            data: SubscriptionEventData::OutputChanged(PaneOutputChangedEvent {
+                pane_id: pick.pane_id.clone(),
+                workspace_id: pick.workspace_id.clone(),
+                revision: pick.content_revision,
+            }),
+        })
+    }
+}
+
 fn pane_read(
     request_id: String,
     pane_id: &str,
@@ -630,6 +734,45 @@ fn pane_get(
     })
 }
 
+fn pane_list(
+    request_id: String,
+    api_tx: &ApiRequestSender,
+) -> Result<Vec<crate::api::schema::PaneInfo>, ErrorResponse> {
+    let response = dispatch_to_app_with_timeout(
+        Request {
+            id: request_id.clone(),
+            method: Method::PaneList(crate::api::schema::PaneListParams { workspace_id: None }),
+        },
+        api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| ErrorResponse {
+        id: request_id.clone(),
+        error: ErrorBody {
+            code: "internal_error".into(),
+            message: "failed to decode pane list response".into(),
+        },
+    })?;
+    if value.get("error").is_some() {
+        let response =
+            serde_json::from_value::<ErrorResponse>(value).map_err(|_| ErrorResponse {
+                id: request_id,
+                error: ErrorBody {
+                    code: "internal_error".into(),
+                    message: "failed to decode pane list error".into(),
+                },
+            })?;
+        return Err(response);
+    }
+    serde_json::from_value(value["result"]["panes"].clone()).map_err(|_| ErrorResponse {
+        id: request_id,
+        error: ErrorBody {
+            code: "internal_error".into(),
+            message: "failed to decode pane list result".into(),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -673,7 +816,92 @@ mod tests {
             agent_session: None,
             scroll,
             revision: 0,
+            content_revision: 0,
         }
+    }
+
+    fn pane_with_content(pane_id: &str, content_revision: u64) -> PaneInfo {
+        let mut pane = pane_info_with_scroll(None);
+        pane.pane_id = pane_id.into();
+        pane.content_revision = content_revision;
+        pane
+    }
+
+    fn output_subscription(last: &[(&str, u64)]) -> ActiveOutputChangedSubscription {
+        ActiveOutputChangedSubscription {
+            pane_id: None,
+            last: last
+                .iter()
+                .map(|(id, rev)| (id.to_string(), *rev))
+                .collect(),
+            last_emitted: None,
+            request_prefix: "req:sub:0".into(),
+        }
+    }
+
+    fn emitted_pane(event: Option<SubscriptionEventEnvelope>) -> Option<(String, u64)> {
+        event.map(|event| match event.data {
+            SubscriptionEventData::OutputChanged(data) => (data.pane_id, data.revision),
+            other => panic!("unexpected subscription data: {other:?}"),
+        })
+    }
+
+    #[test]
+    fn output_changed_emits_on_new_revision_and_coalesces() {
+        let mut subscription = output_subscription(&[("pane_1", 2)]);
+        assert!(subscription
+            .event_from_snapshot(&[pane_with_content("pane_1", 2)])
+            .is_none());
+        // 2 → 6 in one tick still yields a single event at the latest revision
+        let event = subscription.event_from_snapshot(&[pane_with_content("pane_1", 6)]);
+        assert_eq!(emitted_pane(event), Some(("pane_1".into(), 6)));
+        assert!(subscription
+            .event_from_snapshot(&[pane_with_content("pane_1", 6)])
+            .is_none());
+    }
+
+    #[test]
+    fn output_changed_round_robins_so_a_busy_pane_cannot_starve_others() {
+        let mut subscription = output_subscription(&[("pane_a", 0), ("pane_b", 0)]);
+        let first = subscription.event_from_snapshot(&[
+            pane_with_content("pane_a", 1),
+            pane_with_content("pane_b", 1),
+        ]);
+        assert_eq!(emitted_pane(first), Some(("pane_a".into(), 1)));
+        // pane_a keeps writing, but pane_b's pending change goes out first
+        let second = subscription.event_from_snapshot(&[
+            pane_with_content("pane_a", 2),
+            pane_with_content("pane_b", 1),
+        ]);
+        assert_eq!(emitted_pane(second), Some(("pane_b".into(), 1)));
+        let third = subscription.event_from_snapshot(&[
+            pane_with_content("pane_a", 2),
+            pane_with_content("pane_b", 1),
+        ]);
+        assert_eq!(emitted_pane(third), Some(("pane_a".into(), 2)));
+    }
+
+    #[test]
+    fn output_changed_baselines_new_panes_and_drops_closed_ones() {
+        let mut subscription = output_subscription(&[("pane_a", 1)]);
+        // a pane appearing mid-subscription is not output
+        assert!(subscription
+            .event_from_snapshot(&[
+                pane_with_content("pane_a", 1),
+                pane_with_content("pane_b", 7),
+            ])
+            .is_none());
+        // …but its next write is
+        let event = subscription.event_from_snapshot(&[
+            pane_with_content("pane_a", 1),
+            pane_with_content("pane_b", 8),
+        ]);
+        assert_eq!(emitted_pane(event), Some(("pane_b".into(), 8)));
+        // a closed pane forgets its revision, so a reused id starts clean
+        assert!(subscription
+            .event_from_snapshot(&[pane_with_content("pane_a", 1)])
+            .is_none());
+        assert!(!subscription.last.contains_key("pane_b"));
     }
 
     #[test]
