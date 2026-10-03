@@ -227,12 +227,28 @@ fn status_color(
     palette: &Palette,
 ) -> ratatui::style::Color {
     use crate::api::schema::AgentStatus;
-    match status {
-        AgentStatus::Working => palette.yellow,
-        AgentStatus::Blocked => palette.red,
-        AgentStatus::Done => palette.teal,
-        AgentStatus::Idle => palette.green,
+    crate::color::attention_color(status, palette).unwrap_or_else(|| match status {
         AgentStatus::Unknown => palette.overlay0,
+        _ => settled_status_color(palette),
+    })
+}
+
+/// the dimmest grey that still reads on the dim wash, then on the active row's fill.
+fn settled_status_color(palette: &Palette) -> ratatui::style::Color {
+    const FLOOR: f32 = 1.6;
+    let row = palette.active_row_bg;
+    let settled = crate::color::lift_until_legible(
+        palette.surface1,
+        palette.overlay0,
+        palette.surface_dim,
+        FLOOR,
+    );
+    // some themes pitch overlay0 against the row itself, so the walk continues toward text
+    match crate::color::contrast_ratio(settled, row) {
+        Some(ratio) if ratio < FLOOR => {
+            crate::color::lift_until_legible(settled, palette.text, row, FLOOR)
+        }
+        _ => settled,
     }
 }
 
