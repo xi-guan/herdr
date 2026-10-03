@@ -679,6 +679,8 @@ impl Palette {
 pub struct ViewState {
     pub terminal_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
+    /// columns of `terminal_area` the foreground client keeps for its own chrome
+    pub reserved_columns: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1015,13 +1017,20 @@ impl AppState {
         crate::ui::new_layout_terminal_sizes(self, self.new_pane_area(), layout)
     }
 
-    fn new_pane_area(&self) -> Rect {
+    fn new_pane_area(&self) -> crate::ui::SurfaceArea {
         let area = self.view.terminal_area;
         if area.width == 0 || area.height == 0 {
-            Rect::new(0, 0, self.headless_size.0, self.headless_size.1)
+            Rect::new(0, 0, self.headless_size.0, self.headless_size.1).into()
         } else {
-            area
+            crate::ui::SurfaceArea::new(area, self.view.reserved_columns)
         }
+    }
+
+    /// where a tab's panes tile in the foreground view, honouring the client's reservation.
+    pub(crate) fn tab_pane_area(&self, tab: &crate::workspace::Tab) -> crate::layout::PaneArea {
+        crate::ui::SurfaceArea::new(self.view.terminal_area, self.view.reserved_columns)
+            .tab_area(tab)
+            .0
     }
 
     /// Returns true when the given (workspace, tab, pane) refers to the
@@ -1133,6 +1142,7 @@ impl AppState {
             view: ViewState {
                 terminal_area: Rect::default(),
                 pane_infos: Vec::new(),
+                reserved_columns: 0,
             },
             update_available: None,
             update_install_command: "herdr update".into(),

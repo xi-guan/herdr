@@ -17,7 +17,7 @@ use crate::app::AppState;
 use crate::color::{
     attention_color, contrast_ratio, ground_pole, lift_until_legible, nudge_toward,
 };
-use crate::layout::{PaneId, PaneInfo};
+use crate::layout::{PaneArea, PaneId, PaneInfo};
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
@@ -84,7 +84,7 @@ pub(crate) enum NewPanePlacement {
 /// `area`, so its program starts at that size instead of being resized.
 pub(crate) fn new_pane_terminal_size(
     app: &AppState,
-    area: Rect,
+    area: super::SurfaceArea,
     placement: NewPanePlacement,
 ) -> (u16, u16) {
     let laid_out = |panes: Vec<PaneInfo>, index: usize| {
@@ -96,8 +96,10 @@ pub(crate) fn new_pane_terminal_size(
         );
         pane_inner_rect(infos[index].rect, infos[index].borders)
     };
+    // a lone or zoomed pane has no seam to sit on, so any reservation stays at the edge
+    let edge = area.unreserved();
     // A lone pane has no neighbors, so its chrome matches a zoomed single pane.
-    let alone = || pane_inner_rect(area, zoomed_pane_borders(app, false));
+    let alone = || pane_inner_rect(edge, zoomed_pane_borders(app, false));
     let tab_for = |ws_idx: usize, pane: PaneId| {
         let ws = app.workspaces.get(ws_idx)?;
         ws.tabs.get(ws.find_tab_index_for_pane(pane)?)
@@ -108,21 +110,35 @@ pub(crate) fn new_pane_terminal_size(
             .and_then(|tab| {
                 if tab.zoomed && tab.layout.focused() == pane {
                     let multi_pane = tab.layout.pane_count() > 1;
-                    return Some(pane_inner_rect(area, zoomed_pane_borders(app, multi_pane)));
+                    return Some(pane_inner_rect(edge, zoomed_pane_borders(app, multi_pane)));
                 }
-                let panes = tab.layout.panes(area);
+                let panes = tab.layout.panes_in(area.layout_area(&tab.layout, false).0);
                 let index = panes.iter().position(|info| info.id == pane)?;
                 Some(laid_out(panes, index))
             })
             .unwrap_or_else(alone),
-        NewPanePlacement::ZoomedOverlay => pane_inner_rect(area, zoomed_pane_borders(app, true)),
+        NewPanePlacement::ZoomedOverlay => pane_inner_rect(edge, zoomed_pane_borders(app, true)),
         NewPanePlacement::Split {
             ws_idx,
             target,
             direction,
             ratio,
         } => tab_for(ws_idx, target)
-            .and_then(|tab| tab.layout.panes_after_split(area, target, direction, ratio))
+            .and_then(|tab| {
+                // the split may itself open the root seam, so the gutter is the one it leaves
+                let pane_area = match area.reserved() {
+                    0 => PaneArea::Whole(edge),
+                    reserved => tab
+                        .layout
+                        .gutter_areas_after_split(area.rect, reserved, target, direction, ratio)
+                        .map_or(PaneArea::Whole(edge), |(left, _, right)| PaneArea::Gutter {
+                            left,
+                            right,
+                        }),
+                };
+                tab.layout
+                    .panes_after_split_in(pane_area, target, direction, ratio)
+            })
             .map(|(panes, new_index)| laid_out(panes, new_index))
             .unwrap_or_else(alone),
     };
@@ -133,11 +149,11 @@ pub(crate) fn new_pane_terminal_size(
 /// pane order, so a multi-pane layout can start each program at its final size.
 pub(crate) fn new_layout_terminal_sizes(
     app: &AppState,
-    area: Rect,
+    area: super::SurfaceArea,
     layout: &crate::layout::TileLayout,
 ) -> Vec<(u16, u16)> {
     apply_pane_chrome(
-        layout.panes(area),
+        layout.panes_in(area.layout_area(layout, false).0),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -320,7 +336,7 @@ pub(super) fn resize_tab_panes(
     terminal_runtimes: &TerminalRuntimeRegistry,
     workspace_index: usize,
     tab: &crate::workspace::Tab,
-    area: Rect,
+    area: PaneArea,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     let multi_pane = tab.layout.pane_count() > 1;
@@ -330,7 +346,7 @@ pub(super) fn resize_tab_panes(
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, focused_id)
         {
-            let pane_inner = pane_inner_rect(area, zoomed_pane_borders(app, multi_pane));
+            let pane_inner = pane_inner_rect(area.bounds(), zoomed_pane_borders(app, multi_pane));
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -345,7 +361,7 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in apply_pane_chrome(
-        tab.layout.panes(area),
+        tab.layout.panes_in(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -374,7 +390,7 @@ pub(super) fn compute_pane_infos_for_tab(
     terminal_runtimes: &TerminalRuntimeRegistry,
     ws_idx: usize,
     tab_idx: usize,
-    area: Rect,
+    area: PaneArea,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> Vec<PaneInfo> {
@@ -389,6 +405,7 @@ pub(super) fn compute_pane_infos_for_tab(
     let multi_pane = tab.layout.pane_count() > 1;
 
     if tab.zoomed {
+        let area = area.bounds();
         let focused_id = tab.layout.focused();
         let borders = zoomed_pane_borders(app, multi_pane);
         let pane_inner = pane_inner_rect(area, borders);
@@ -421,7 +438,7 @@ pub(super) fn compute_pane_infos_for_tab(
     }
 
     let mut pane_infos = apply_pane_chrome(
-        tab.layout.panes(area),
+        tab.layout.panes_in(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -479,7 +496,7 @@ fn compute_pane_infos(
         terminal_runtimes,
         workspace_index,
         tab_index,
-        area,
+        PaneArea::Whole(area),
         resize_panes,
         cell_size,
     )

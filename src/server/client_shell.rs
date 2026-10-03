@@ -292,6 +292,8 @@ pub(super) fn snapshot_with_completions(
         commands: app.client_shell_command_manifest(),
         claude_usage,
         hidden_workspaces,
+        // per connection: the render pass fills it from that client's own surface
+        surface_reservation: None,
     };
     (shell, completions)
 }
@@ -304,6 +306,8 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
     pub(super) graphics_sources: crate::kitty_graphics::surface::SourceFiles,
+    /// columns left free for the client, reported to it beside this surface
+    pub(super) reserved: Option<Rect>,
 }
 
 #[derive(Debug)]
@@ -315,13 +319,14 @@ pub(super) enum SurfaceRenderDeferred {
 pub(super) fn render_pane_surface(
     app: &mut app::App,
     target: Option<crate::ui::TabSurfaceTarget>,
-    area: Rect,
+    area: impl Into<crate::ui::SurfaceArea>,
     resize_panes: bool,
     show_popup: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
 ) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    let area = area.into();
     let layout = crate::ui::compute_tab_surface_for(
         &app.state,
         &app.terminal_runtimes,
@@ -368,7 +373,7 @@ pub(super) fn render_pane_surface(
             &app.state,
             &app.terminal_runtimes,
             layout,
-            area,
+            area.rect,
         );
     let panes = target
         .map(|target| {
@@ -466,7 +471,7 @@ pub(super) fn render_pane_surface(
         })
         .collect();
     let popup = show_popup
-        .then(|| render_popup_surface(app, area, resize_panes, cell_size))
+        .then(|| render_popup_surface(app, layout.pane_bounds, resize_panes, cell_size))
         .flatten();
     let (graphics, next_graphics_delivery, graphics_sources) =
         crate::server::client_shell_graphics::collect(
@@ -520,6 +525,7 @@ pub(super) fn render_pane_surface(
         graphics,
         graphics_delivery: next_graphics_delivery,
         graphics_sources,
+        reserved: layout.reserved,
     })
 }
 
