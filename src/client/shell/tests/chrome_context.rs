@@ -159,7 +159,10 @@ fn focused_workspace_change_reveals_new_workspace_in_full_sidebar() {
         })
         .collect();
 
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut config = Config::default();
+    // the spaces tree has the sidebar's full height, so only spaced rows still overflow it
+    config.ui.sidebar.spaces.row_gap = 1;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(initial));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("full sidebar");
@@ -276,22 +279,23 @@ fn client_owned_sidebar_dividers_resize_live() {
     assert!(recovered_text.contains(" spaces"));
     assert!(recovered_text.contains("LIVE"));
     assert!(!state.hits.panes.is_empty());
-    let section_divider = state.hits.sidebar_section_divider;
+    // the views share the full height, so there is no section divider left to drag
+    assert_eq!(state.hits.sidebar_section_divider, Rect::default());
+    let split_before = state.sidebar_section_split;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: section_divider.x + 2,
-        row: section_divider.y,
+        column: 2,
+        row: 15,
         modifiers: KeyModifiers::empty(),
     })]);
-    let split = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Drag(MouseButton::Left),
-        column: section_divider.x + 2,
+        column: 2,
         row: 20,
         modifiers: KeyModifiers::empty(),
     })]);
-    assert!(state.sidebar_section_split > 0.6);
-    assert!(split.repaint);
-    assert!(!split.resize);
+    assert_eq!(state.sidebar_section_split, split_before);
+    assert!(!drag.resize);
 }
 
 #[test]

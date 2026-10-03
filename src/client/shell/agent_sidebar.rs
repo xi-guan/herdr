@@ -49,42 +49,151 @@ pub(super) fn ordered_agent_pane_ids(
         .collect()
 }
 
-pub(super) fn render_agent_panel(
+/// the single-machine agents view: the sort control on its own row, the list under it.
+pub(super) fn render_local_agents_view(
     buffer: &mut Buffer,
-    area: Rect,
+    content: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    spinner_frame: u64,
     hits: &mut ShellHitMap,
 ) {
-    if !render_agent_panel_header(
-        buffer,
-        area,
-        snapshot.agent_view_label.as_deref(),
-        config,
-        hits,
-    ) {
+    if content.height < 3 {
         return;
     }
+    let palette = &config.palette;
+    let agent_view_label = snapshot.agent_view_label.as_deref();
+    let label = agent_view_label.unwrap_or(match config.agent_panel_sort {
+        crate::config::AgentPanelSortConfig::Spaces => "grouped",
+        crate::config::AgentPanelSortConfig::Priority => "priority",
+    });
+    let width = (display_width(label) as u16).min(content.width);
+    let label_rect = Rect::new(
+        content.right().saturating_sub(width),
+        content.y + 1,
+        width,
+        1,
+    );
+    Paragraph::new(ratatui::text::Span::styled(
+        label,
+        Style::default()
+            .fg(if agent_view_label.is_some() {
+                palette.accent
+            } else {
+                palette.overlay0
+            })
+            .add_modifier(Modifier::BOLD),
+    ))
+    .alignment(ratatui::layout::Alignment::Right)
+    .render(label_rect, buffer);
+    hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
+        label_rect
+    } else {
+        Rect::default()
+    };
 
+    // the list stops above the footer row the spaces view shares
+    let list_area = Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(1),
+    );
     let rows = agent_rows(snapshot, config, None);
     render_agent_list(
         buffer,
-        area,
+        list_area,
         &rows,
-        snapshot
-            .agent_view_label
-            .as_ref()
-            .map(|_| " no matching agents"),
+        agent_view_label.map(|_| " no matching agents"),
         config,
         agent_scroll,
         hits,
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            render_local_agent_row(buffer, rect, row, config, spinner_frame, hits);
         },
     );
+}
+
+fn render_local_agent_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &AgentRow,
+    config: &ClientShellConfig,
+    spinner_frame: u64,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    let row_style = if row.focused {
+        // the tier the tree gives the focused agent row
+        Style::default().bg(palette.active_row_bg)
+    } else {
+        Style::default()
+    };
+    let name_style = Style::default()
+        .fg(if row.focused {
+            palette.text
+        } else {
+            palette.subtext0
+        })
+        .add_modifier(Modifier::BOLD);
+    let label_color = status_text_color(row.status, palette);
+    let status_style = if row.focused {
+        Style::default().fg(label_color)
+    } else {
+        Style::default().fg(label_color).add_modifier(Modifier::DIM)
+    };
+    let agent_style = Style::default()
+        .fg(palette.overlay0)
+        .add_modifier(Modifier::DIM);
+    let icon = (
+        agent_status_glyph(row.status, config.status_indicators, spinner_frame),
+        Style::default().fg(status_color(row.status, palette)),
+    );
+    let styles = crate::ui::RowStyles {
+        state_text: status_style,
+        workspace: name_style,
+        agent: agent_style,
+        branch: Style::default().fg(palette.mauve),
+        secondary: agent_style,
+        custom: agent_style,
+        separator: Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM),
+    };
+    for (index, tokens) in row.rows.iter().take(rect.height as usize).enumerate() {
+        let indent: u16 = if index == 0 { 1 } else { 3 };
+        let y = rect.y + index as u16;
+        let styled = crate::ui::styled_token_spans(
+            tokens,
+            icon,
+            styles,
+            palette,
+            rect.width.saturating_sub(indent) as usize,
+            crate::ui::sidebar_separator_tree,
+        );
+        if let Some(column) = styled
+            .state_icon_column
+            .filter(|_| status_turns(row.status, config.status_indicators))
+        {
+            let x = rect.x.saturating_add(indent).saturating_add(column);
+            if x < rect.right() {
+                hits.spinner_cells.push(super::spinner::SpinnerCell {
+                    x,
+                    y,
+                    glyph: super::spinner::SpinnerGlyph::Single,
+                    cell: None,
+                });
+            }
+        }
+        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent as usize))];
+        spans.extend(styled.spans);
+        Paragraph::new(Line::from(spans))
+            .style(row_style)
+            .render(Rect::new(rect.x, y, rect.width, 1), buffer);
+    }
 }
 
 pub(super) fn render_agent_panel_header(
@@ -241,7 +350,16 @@ pub(super) fn agent_rows(
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .filter_map(|pane_id| match machine {
+            Some(_) => agent_row(snapshot, &pane_id, config, machine),
+            None => resolve_agent_row(
+                snapshot,
+                &pane_id,
+                config,
+                None,
+                crate::ui::sidebar_local_agent_rows,
+            ),
+        })
         .collect()
 }
 
@@ -250,6 +368,28 @@ pub(super) fn agent_row(
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
+) -> Option<AgentRow> {
+    resolve_agent_row(
+        snapshot,
+        pane_id,
+        config,
+        machine,
+        crate::ui::sidebar_agent_rows,
+    )
+}
+
+type AgentRowResolver = fn(
+    &crate::config::AgentsSidebarConfig,
+    crate::ui::AgentTokenContext<'_>,
+    &str,
+) -> Vec<Vec<crate::ui::ResolvedToken>>;
+
+fn resolve_agent_row(
+    snapshot: &ClientShellSnapshot,
+    pane_id: &str,
+    config: &ClientShellConfig,
+    machine: Option<&str>,
+    resolve: AgentRowResolver,
 ) -> Option<AgentRow> {
     let agent = snapshot
         .agents
@@ -292,7 +432,7 @@ pub(super) fn agent_row(
         .agent
         .as_deref()
         .and_then(crate::detect::parse_agent_label);
-    let rows = crate::ui::sidebar_agent_rows(
+    let rows = resolve(
         &config.agents,
         crate::ui::AgentTokenContext {
             machine,
@@ -385,7 +525,7 @@ fn display_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
-fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {
+pub(super) fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {
     use crate::api::schema::AgentStatus;
     match status {
         AgentStatus::Blocked => "blocked",

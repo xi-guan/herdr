@@ -311,6 +311,8 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+On a single machine the expanded sidebar has two views that share its full height; click `spaces` or `agents` in its first row to switch. The Spaces view lists each Space with its agents nested beneath it. Nested agent rows drop the `workspace` token and merge what shared its row into the next one, and drop a `tab` that every agent in the Space shares. Identical sibling rows gain the pane's name, its title, or an ordinal. The Agents view lists every agent in `agent_panel_sort` order. Clicking an agent row focuses its pane. With `status_indicators = "dots"`, a working agent's mark turns.
+
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
@@ -388,6 +390,7 @@ Agent rows accept these built-in tokens:
 - `tab` — tab name when available.
 - `pane` — pane name when available.
 - `agent` — detected or reported agent display name.
+- `branch` — the Git branch of the Space an agent row hangs under; only agent rows nested in the Spaces tree resolve it, and `main` and `master` are omitted.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
 - `$name` — custom pane metadata named `name`.
@@ -434,7 +437,7 @@ The first matching rule wins. Its specified style fields override the occurrence
 
 Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `rows_by_agent` overrides, and Space rows. Custom tokens match their reported value: `$load` reporting `"90"` selects red and bold above, `"60"` selects yellow, and `"90%"` keeps white. Unreported tokens still disappear. `state_icon` and composite `git_status` accept fixed styles only, not rules. Unknown conditions and malformed rules are rejected when loading config; regex, fuzzy matching, and scripts are not supported.
 
-`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. In the Spaces tree, a Space gap of `1` or more draws a rule above each top-level Space. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 

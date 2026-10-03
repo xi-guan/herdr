@@ -2016,6 +2016,20 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if let Some(view) = self
+                    .hits
+                    .sidebar_view_tabs
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, view)| *view)
+                {
+                    if view != self.sidebar_view {
+                        self.sidebar_view = view;
+                        self.persist_chrome_preferences(outcome);
+                        outcome.repaint = true;
+                    }
+                    return;
+                }
                 if super::contains(self.hits.agent_sort_toggle, point) {
                     let sort = match self.config.agent_panel_sort {
                         crate::config::AgentPanelSortConfig::Spaces => {
@@ -2154,6 +2168,13 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .map(|(_, pane_id)| pane_id.clone());
                 if let Some(pane_id) = agent_pane_id {
+                    // picking an agent ends a navigation, as clicking its pane would
+                    if self.mode == ClientShellMode::Navigate {
+                        self.mode = self.copy_or_terminal_mode();
+                        self.navigate_workspace_id = None;
+                        outcome.repaint = true;
+                    }
+                    self.reveal_agent_in_tree(&pane_id);
                     self.push_endpoint_method(
                         crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
                             pane_id,

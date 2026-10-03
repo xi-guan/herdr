@@ -46,6 +46,10 @@ impl ResolvedToken {
         Self { kind, style }
     }
 
+    pub(crate) fn plain(kind: ResolvedTokenKind) -> Self {
+        Self::new(kind, SidebarTokenStyle::default())
+    }
+
     #[cfg(test)]
     pub(super) fn unstyled(kind: ResolvedTokenKind) -> Self {
         Self::new(kind, SidebarTokenStyle::default())
@@ -64,61 +68,160 @@ pub(crate) struct AgentTokenContext<'a> {
     pub(crate) tokens: &'a std::collections::HashMap<String, String>,
 }
 
+/// presentation only: the API, detection and config all match on the agent's full name.
+fn agent_row_label(label: &str) -> &str {
+    match label {
+        "claude" => "cc",
+        "codex" => "cx",
+        other => other,
+    }
+}
+
+/// finding the real default branch would need a git read the render path cannot afford.
+const UNREMARKABLE_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// what the parent space row already shows, so a nested agent row can skip repeating it.
+#[derive(Clone, Copy)]
+pub(crate) struct NestedContext<'a> {
+    pub(crate) branch: Option<&'a str>,
+    /// a worktree child is named after its own branch, which must not print again beneath it
+    pub(crate) space_label: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+enum AgentRowForm<'a> {
+    /// every machine's agents panel, as upstream draws it
+    Shared,
+    /// the single-machine agents view
+    Local,
+    /// an agent row hanging under its space in the spaces tree
+    Nested(NestedContext<'a>),
+}
+
 pub(crate) fn agent_rows(
     config: &AgentsSidebarConfig,
     context: AgentTokenContext<'_>,
     state_text: &str,
 ) -> Vec<Vec<ResolvedToken>> {
-    config
-        .rows_for_agent(context.canonical_agent)
-        .iter()
-        .filter_map(|row| {
-            let resolved = row
+    resolve_agent_rows(config, context, state_text, AgentRowForm::Shared)
+}
+
+pub(crate) fn local_agent_rows(
+    config: &AgentsSidebarConfig,
+    context: AgentTokenContext<'_>,
+    state_text: &str,
+) -> Vec<Vec<ResolvedToken>> {
+    resolve_agent_rows(config, context, state_text, AgentRowForm::Local)
+}
+
+/// the space row names the space, so `workspace` drops and its row merges into the next one.
+pub(crate) fn nested_agent_rows(
+    config: &AgentsSidebarConfig,
+    context: AgentTokenContext<'_>,
+    state_text: &str,
+    parent: NestedContext<'_>,
+) -> Vec<Vec<ResolvedToken>> {
+    resolve_agent_rows(config, context, state_text, AgentRowForm::Nested(parent))
+}
+
+fn resolve_agent_rows(
+    config: &AgentsSidebarConfig,
+    context: AgentTokenContext<'_>,
+    state_text: &str,
+    form: AgentRowForm<'_>,
+) -> Vec<Vec<ResolvedToken>> {
+    let nested = match form {
+        AgentRowForm::Nested(parent) => Some(parent),
+        AgentRowForm::Shared | AgentRowForm::Local => None,
+    };
+    let shorten = !matches!(form, AgentRowForm::Shared);
+    let mut rows: Vec<Vec<ResolvedToken>> = Vec::new();
+    let mut carried: Vec<ResolvedToken> = Vec::new();
+    for row in config.rows_for_agent(context.canonical_agent) {
+        let drops_workspace = nested.is_some()
+            && row
                 .iter()
-                .filter_map(|configured| {
-                    let (token, style) = configured.parts();
-                    let kind = match token {
-                        AgentSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
-                        AgentSidebarToken::StateText => {
-                            Some(ResolvedTokenKind::StateText(state_text.to_string()))
-                        }
-                        AgentSidebarToken::Machine => context
-                            .machine
-                            .map(|value| ResolvedTokenKind::Machine(value.to_string())),
-                        AgentSidebarToken::Workspace => {
-                            Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
-                        }
-                        AgentSidebarToken::Tab => context
-                            .tab
-                            .map(|value| ResolvedTokenKind::Tab(value.to_string())),
-                        AgentSidebarToken::Pane => context
-                            .pane
-                            .map(|value| ResolvedTokenKind::Pane(value.to_string())),
-                        AgentSidebarToken::Agent => context
-                            .agent_label
-                            .map(|value| ResolvedTokenKind::Agent(value.to_string())),
-                        AgentSidebarToken::TerminalTitle => context
-                            .terminal_title
-                            .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
-                        AgentSidebarToken::TerminalTitleStripped => context
-                            .terminal_title_stripped
-                            .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
-                        AgentSidebarToken::Custom(name) => context
-                            .tokens
-                            .get(name)
-                            .cloned()
-                            .map(ResolvedTokenKind::Custom),
-                        AgentSidebarToken::Styled { .. } => None,
-                    }?;
-                    let style = kind
-                        .text_value()
-                        .map_or(Some(style), |value| configured.style_for_value(value))?;
-                    Some(ResolvedToken::new(kind, style))
-                })
-                .collect::<Vec<_>>();
-            (!resolved.is_empty()).then_some(resolved)
-        })
-        .collect()
+                .any(|configured| matches!(configured.parts().0, AgentSidebarToken::Workspace));
+        let resolved = row
+            .iter()
+            .filter_map(|configured| {
+                let (token, style) = configured.parts();
+                let kind = match token {
+                    AgentSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
+                    AgentSidebarToken::StateText => {
+                        Some(ResolvedTokenKind::StateText(state_text.to_string()))
+                    }
+                    AgentSidebarToken::Machine => context
+                        .machine
+                        .map(|value| ResolvedTokenKind::Machine(value.to_string())),
+                    AgentSidebarToken::Workspace if nested.is_some() => None,
+                    AgentSidebarToken::Workspace => {
+                        Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
+                    }
+                    AgentSidebarToken::Tab => context
+                        .tab
+                        // a tab named after the branch repeats what the space row carries
+                        .filter(|label| nested.is_none_or(|parent| parent.branch != Some(*label)))
+                        .map(|value| ResolvedTokenKind::Tab(value.to_string())),
+                    AgentSidebarToken::Pane => context
+                        .pane
+                        .map(|value| ResolvedTokenKind::Pane(value.to_string())),
+                    AgentSidebarToken::Agent => context
+                        .agent_label
+                        .map(|value| ResolvedTokenKind::Agent(value.to_string())),
+                    // the flat lists have no parent space, so there is no branch to name
+                    AgentSidebarToken::Branch => nested
+                        .and_then(|parent| parent.branch)
+                        .filter(|branch| {
+                            nested.is_none_or(|parent| parent.space_label != Some(*branch))
+                        })
+                        .filter(|branch| !UNREMARKABLE_BRANCHES.contains(branch))
+                        .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
+                    AgentSidebarToken::TerminalTitle => context
+                        .terminal_title
+                        .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
+                    AgentSidebarToken::TerminalTitleStripped => context
+                        .terminal_title_stripped
+                        .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
+                    AgentSidebarToken::Custom(name) => context
+                        .tokens
+                        .get(name)
+                        .cloned()
+                        .map(ResolvedTokenKind::Custom),
+                    AgentSidebarToken::Styled { .. } => None,
+                }?;
+                let style = kind
+                    .text_value()
+                    .map_or(Some(style), |value| configured.style_for_value(value))?;
+                // rules matched the full name above; only the drawn text is shortened
+                let kind = match kind {
+                    ResolvedTokenKind::Agent(label) if shorten => {
+                        ResolvedTokenKind::Agent(agent_row_label(&label).to_string())
+                    }
+                    kind => kind,
+                };
+                Some(ResolvedToken::new(kind, style))
+            })
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            continue;
+        }
+        if drops_workspace {
+            carried.extend(resolved);
+            continue;
+        }
+        if carried.is_empty() {
+            rows.push(resolved);
+        } else {
+            let mut merged = std::mem::take(&mut carried);
+            merged.extend(resolved);
+            rows.push(merged);
+        }
+    }
+    if !carried.is_empty() {
+        rows.push(carried);
+    }
+    rows
 }
 
 pub(crate) struct SpaceTokenContext<'a> {
@@ -128,53 +231,98 @@ pub(crate) struct SpaceTokenContext<'a> {
     pub(crate) ahead_behind: Option<(usize, usize)>,
     pub(crate) tokens: &'a std::collections::HashMap<String, String>,
     pub(crate) suppress_git_details: bool,
+    /// set when the agent rows below already name the branch
+    pub(crate) suppress_branch: bool,
 }
 
 pub(crate) fn space_rows(
     config: &SpacesSidebarConfig,
     context: SpaceTokenContext<'_>,
 ) -> Vec<Vec<ResolvedToken>> {
-    config
-        .rows
-        .iter()
-        .filter_map(|row| {
-            let resolved = row
+    let mut rows: Vec<Vec<ResolvedToken>> = Vec::new();
+    for row in &config.rows {
+        // what shared the branch's row rides up a line rather than holding one open alone
+        let held_branch = context.suppress_branch
+            && row
                 .iter()
-                .filter_map(|configured| {
-                    let (token, style) = configured.parts();
-                    let kind = match token {
-                        SpaceSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
-                        SpaceSidebarToken::StateText => {
-                            Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
-                        }
-                        SpaceSidebarToken::Workspace => {
-                            Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
-                        }
-                        SpaceSidebarToken::Branch if !context.suppress_git_details => context
+                .any(|configured| matches!(configured.parts().0, SpaceSidebarToken::Branch));
+        let resolved = row
+            .iter()
+            .filter_map(|configured| {
+                let (token, style) = configured.parts();
+                let kind = match token {
+                    SpaceSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
+                    SpaceSidebarToken::StateText => {
+                        Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
+                    }
+                    SpaceSidebarToken::Workspace => {
+                        Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
+                    }
+                    SpaceSidebarToken::Branch
+                        if !context.suppress_git_details && !context.suppress_branch =>
+                    {
+                        context
                             .branch
-                            .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
-                        SpaceSidebarToken::Branch => None,
-                        SpaceSidebarToken::GitStatus if !context.suppress_git_details => context
-                            .ahead_behind
-                            .filter(|(ahead, behind)| *ahead > 0 || *behind > 0)
-                            .map(|(ahead, behind)| ResolvedTokenKind::GitStatus { ahead, behind }),
-                        SpaceSidebarToken::GitStatus => None,
-                        SpaceSidebarToken::Custom(name) => context
-                            .tokens
-                            .get(name)
-                            .cloned()
-                            .map(ResolvedTokenKind::Custom),
-                        SpaceSidebarToken::Styled { .. } => None,
-                    }?;
-                    let style = kind
-                        .text_value()
-                        .map_or(Some(style), |value| configured.style_for_value(value))?;
-                    Some(ResolvedToken::new(kind, style))
-                })
-                .collect::<Vec<_>>();
-            (!resolved.is_empty()).then_some(resolved)
-        })
-        .collect()
+                            .map(|branch| ResolvedTokenKind::Branch(branch.to_string()))
+                    }
+                    SpaceSidebarToken::Branch => None,
+                    SpaceSidebarToken::GitStatus if !context.suppress_git_details => context
+                        .ahead_behind
+                        .filter(|(ahead, behind)| *ahead > 0 || *behind > 0)
+                        .map(|(ahead, behind)| ResolvedTokenKind::GitStatus { ahead, behind }),
+                    SpaceSidebarToken::GitStatus => None,
+                    SpaceSidebarToken::Custom(name) => context
+                        .tokens
+                        .get(name)
+                        .cloned()
+                        .map(ResolvedTokenKind::Custom),
+                    SpaceSidebarToken::Styled { .. } => None,
+                }?;
+                let style = kind
+                    .text_value()
+                    .map_or(Some(style), |value| configured.style_for_value(value))?;
+                Some(ResolvedToken::new(kind, style))
+            })
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            continue;
+        }
+        match rows.last_mut().filter(|_| held_branch) {
+            Some(previous) => previous.extend(resolved),
+            None => rows.push(resolved),
+        }
+    }
+    rows
+}
+
+/// the text a set of rows renders, joined on a byte no label holds so `ab|c` never equals `a|bc`.
+pub(crate) fn rows_text(rows: &[Vec<ResolvedToken>]) -> String {
+    rows.iter()
+        .flatten()
+        .map(|token| token.kind.text_value().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\u{1}")
+}
+
+/// a branch has its own colour and a title is a phrase, so a dot beside either only costs width.
+pub(crate) fn separator_tree(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
+    // a pane name qualifies whatever it trails, and the dot is what says so
+    if matches!(current.kind, ResolvedTokenKind::Pane(_)) {
+        return " · ";
+    }
+    if matches!(
+        previous.kind,
+        ResolvedTokenKind::StateIcon | ResolvedTokenKind::Branch(_)
+    ) || matches!(
+        current.kind,
+        ResolvedTokenKind::Branch(_)
+            | ResolvedTokenKind::GitStatus { .. }
+            | ResolvedTokenKind::TerminalTitle(_)
+    ) {
+        " "
+    } else {
+        " · "
+    }
 }
 
 pub(crate) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
@@ -332,6 +480,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, dim = true }] }]]
                     ahead_behind: None,
                     suppress_git_details: false,
                     tokens: &entry.tokens,
+                    suppress_branch: false,
                 },
             );
             assert_eq!(spaces[0][0].style.dim, (value == "20").then_some(true));
@@ -381,6 +530,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                     ahead_behind: None,
                     suppress_git_details: false,
                     tokens: &entry.tokens,
+                    suppress_branch: false,
                 },
             );
             assert_eq!(rows.len(), count);
@@ -537,6 +687,253 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
     }
 
     #[test]
+    fn nested_agent_rows_drop_workspace_and_merge_its_row_forward() {
+        let config = AgentsSidebarConfig::default();
+        let entry = entry();
+
+        assert_eq!(
+            nested_agent_rows(
+                &config,
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: None,
+                    space_label: None
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+    }
+
+    // the owner's rows: branch and title ride the name's row
+    fn branch_rows() -> AgentsSidebarConfig {
+        let mut config = AgentsSidebarConfig::default();
+        config.rows[1] = vec![
+            AgentSidebarToken::Agent,
+            AgentSidebarToken::Branch,
+            AgentSidebarToken::TerminalTitleStripped,
+        ];
+        config
+    }
+
+    /// the title shares the name's row so a nested agent costs one line
+    #[test]
+    fn nested_agent_rows_put_the_terminal_title_on_the_agent_row() {
+        let mut entry = entry();
+        entry.terminal_title_stripped = Some("reviewing the sidebar".into());
+
+        assert_eq!(
+            nested_agent_rows(
+                &branch_rows(),
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: None,
+                    space_label: None
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle(
+                    "reviewing the sidebar".into()
+                )),
+            ]]
+        );
+    }
+
+    #[test]
+    fn nested_agent_rows_keep_the_tab_label_that_shared_the_workspace_row() {
+        let mut entry = entry();
+        entry.tab = Some("1".into());
+
+        assert_eq!(
+            nested_agent_rows(
+                &AgentsSidebarConfig::default(),
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: None,
+                    space_label: None
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("1".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn nested_agent_rows_drop_a_tab_named_after_the_parent_branch() {
+        let mut entry = entry();
+        entry.tab = Some("release".into());
+
+        assert_eq!(
+            nested_agent_rows(
+                &branch_rows(),
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: Some("release"),
+                    space_label: None,
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Branch("release".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn nested_agent_rows_keep_a_tab_that_differs_from_the_parent_branch() {
+        let mut entry = entry();
+        entry.tab = Some("review".into());
+
+        assert_eq!(
+            nested_agent_rows(
+                &branch_rows(),
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: Some("release"),
+                    space_label: None,
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("review".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Branch("release".into())),
+            ]]
+        );
+    }
+
+    /// the default branch is the absence of news, so the title takes those columns instead
+    #[test]
+    fn nested_agent_rows_drop_a_branch_nobody_needs_told_about() {
+        let entry = entry();
+        for branch in ["main", "master"] {
+            assert_eq!(
+                nested_agent_rows(
+                    &AgentsSidebarConfig::default(),
+                    context(&entry),
+                    "working",
+                    NestedContext {
+                        branch: Some(branch),
+                        space_label: None,
+                    }
+                ),
+                vec![vec![
+                    ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ]],
+                "{branch}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_agent_rows_keep_a_tab_named_after_the_branch() {
+        let mut entry = entry();
+        entry.tab = Some("main".into());
+
+        let rows = local_agent_rows(&AgentsSidebarConfig::default(), context(&entry), "working");
+
+        assert!(
+            rows[0].contains(&ResolvedToken::unstyled(ResolvedTokenKind::Tab(
+                "main".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn nested_agent_rows_drop_a_row_that_only_held_the_workspace() {
+        let config = AgentsSidebarConfig {
+            rows: vec![
+                vec![AgentSidebarToken::Workspace],
+                vec![AgentSidebarToken::StateIcon, AgentSidebarToken::Agent],
+            ],
+            ..Default::default()
+        };
+        let entry = entry();
+
+        assert_eq!(
+            nested_agent_rows(
+                &config,
+                context(&entry),
+                "working",
+                NestedContext {
+                    branch: None,
+                    space_label: None
+                }
+            ),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn flat_agent_rows_still_render_the_workspace() {
+        let entry = entry();
+        assert_eq!(
+            local_agent_rows(&AgentsSidebarConfig::default(), context(&entry), "working"),
+            vec![
+                vec![
+                    ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Workspace("repo".into())),
+                ],
+                vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                    "pi".into()
+                ))],
+            ]
+        );
+    }
+
+    /// only the drawn name shortens: the shared rows other machines use keep it whole
+    #[test]
+    fn local_and_nested_rows_call_claude_and_codex_by_their_initials() {
+        let mut entry = entry();
+        for (full, short) in [("claude", "cc"), ("codex", "cx"), ("pi", "pi")] {
+            entry.agent_label = Some(full.into());
+            let config = AgentsSidebarConfig {
+                rows: vec![vec![AgentSidebarToken::Agent]],
+                ..Default::default()
+            };
+            let nested = NestedContext {
+                branch: None,
+                space_label: None,
+            };
+            let agent = |rows: Vec<Vec<ResolvedToken>>| rows[0][0].kind.clone();
+            assert_eq!(
+                agent(local_agent_rows(&config, context(&entry), "working")),
+                ResolvedTokenKind::Agent(short.into())
+            );
+            assert_eq!(
+                agent(nested_agent_rows(
+                    &config,
+                    context(&entry),
+                    "working",
+                    nested
+                )),
+                ResolvedTokenKind::Agent(short.into())
+            );
+            assert_eq!(
+                agent(agent_rows(&config, context(&entry), "working")),
+                ResolvedTokenKind::Agent(full.into())
+            );
+        }
+    }
+
+    #[test]
     fn grouped_children_suppress_all_builtin_git_details() {
         let config = SpacesSidebarConfig::default();
 
@@ -550,6 +947,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                     ahead_behind: Some((2, 1)),
                     tokens: &std::collections::HashMap::new(),
                     suppress_git_details: true,
+                    suppress_branch: false,
                 },
             ),
             vec![vec![
@@ -577,6 +975,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                     ahead_behind: None,
                     tokens: &tokens,
                     suppress_git_details: false,
+                    suppress_branch: false,
                 },
             ),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Custom(

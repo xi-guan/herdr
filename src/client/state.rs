@@ -315,6 +315,22 @@ impl ClientState {
         let _ = stdout.flush();
     }
 
+    /// repaints the turning marks alone; false asks for a full compose instead.
+    pub(super) fn present_spinner_repaint(
+        &mut self,
+        repaint: shell::SpinnerRepaint,
+    ) -> io::Result<bool> {
+        // a frame composed but never shown would put the marks where nothing expects them
+        if !self.blit_encoder.shows(&repaint.shown) {
+            return Ok(false);
+        }
+        let cursor = self.blit_encoder.presented_cursor();
+        self.present_surface_patch(shell::ClientComposedSurfacePatch {
+            rows: repaint.next,
+            cursor,
+        })
+    }
+
     pub(super) fn present_surface_patch(
         &mut self,
         patch: shell::ClientComposedSurfacePatch,

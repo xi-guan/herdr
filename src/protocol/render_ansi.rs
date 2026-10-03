@@ -137,6 +137,23 @@ impl BlitEncoder {
         self.last_frame.as_ref() == Some(frame)
     }
 
+    /// whether the presented frame holds exactly these cells, so a patch over them stays coherent.
+    pub(crate) fn shows(&self, rows: &[PaneSurfacePatchRow]) -> bool {
+        let Some(frame) = self.last_frame.as_ref() else {
+            return false;
+        };
+        rows.iter().all(|row| {
+            patch_row_fits(frame, row)
+                && frame_cell_index(frame, row.x, row.y).is_some_and(|start| {
+                    frame.cells.get(start..start + row.cells.len()) == Some(&row.cells[..])
+                })
+        })
+    }
+
+    pub(crate) fn presented_cursor(&self) -> Option<CursorState> {
+        self.last_frame.as_ref()?.cursor.clone()
+    }
+
     pub(crate) fn encode_patch(
         &self,
         rows: &[PaneSurfacePatchRow],

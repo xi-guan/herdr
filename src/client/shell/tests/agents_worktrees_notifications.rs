@@ -714,6 +714,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         ],
     );
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    // the spaces tree lists agents under their space; the agents view keeps the priority order
+    state.sidebar_view = preferences::SidebarView::Agents;
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
 
@@ -755,7 +757,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"
     ));
 
-    state.compose(106, 10).expect("short agent sidebar frame");
+    // one two-row agent fills the body, so the other waits a wheel notch below
+    state.compose(106, 7).expect("short agent sidebar frame");
     assert_eq!(
         state
             .hits
@@ -771,9 +774,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         row: body.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    state
-        .compose(106, 10)
-        .expect("scrolled agent sidebar frame");
+    state.compose(106, 7).expect("scrolled agent sidebar frame");
     assert_eq!(
         state
             .hits
@@ -798,7 +799,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
 }
 
 #[test]
-fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
+fn agent_sidebar_rows_dim_their_quiet_tokens_and_keep_the_name_bright() {
     let mut projected = snapshot();
     projected.tabs[0].label = "second".into();
     projected.tabs[0].custom_label = true;
@@ -821,22 +822,41 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    let frame = state.compose(106, 30).expect("agent sidebar frame");
-    let row = state.hits.agents.first().expect("agent row hit").0;
-    let buffer = frame.to_ratatui_buffer().expect("agent sidebar buffer");
 
+    // the agents view: the space name leads, and the tab, agent and separators recede
+    state.sidebar_view = preferences::SidebarView::Agents;
+    let frame = state.compose(106, 30).expect("agents view frame");
+    let row = Rect {
+        height: 2,
+        ..state.hits.agents.first().expect("agent row hit").0
+    };
+    let buffer = frame.to_ratatui_buffer().expect("agents view buffer");
     for (label, needle) in [("tab", "second"), ("agent", "reviewer"), ("separator", "·")] {
         let (x, y) = cell_symbol_position(&frame, row, needle);
-        let cell = buffer.cell((x, y)).expect("muted sidebar cell");
+        let cell = buffer.cell((x, y)).expect("agents view cell");
         assert!(
-            !cell.modifier.contains(Modifier::DIM),
-            "{label} cell at ({x},{y}) should not stack terminal faint: {cell:?}"
+            cell.modifier.contains(Modifier::DIM),
+            "{label} cell at ({x},{y}) should recede: {cell:?}"
         );
     }
+    let (x, y) = cell_symbol_position(&frame, row, "client-shell");
+    let space = buffer.cell((x, y)).expect("space name cell");
+    assert!(!space.modifier.contains(Modifier::DIM), "{space:?}");
+
+    // the tree: the agent names its own row, so it carries the bright tier undimmed
+    state.sidebar_view = preferences::SidebarView::Spaces;
+    let frame = state.compose(106, 30).expect("spaces view frame");
+    let row = state.hits.agents.first().expect("tree agent row").0;
+    let buffer = frame.to_ratatui_buffer().expect("spaces view buffer");
+    let (x, y) = cell_symbol_position(&frame, row, "reviewer");
+    let name = buffer.cell((x, y)).expect("tree agent name cell");
+    assert!(!name.modifier.contains(Modifier::DIM), "{name:?}");
+    assert!(name.modifier.contains(Modifier::BOLD), "{name:?}");
+    assert_eq!(name.fg, state.config.palette.blue);
 }
 
 #[test]
-fn workspace_state_text_does_not_stack_terminal_faint() {
+fn workspace_state_text_is_dim_in_its_state_colour() {
     use crate::config::SpaceSidebarToken;
 
     let mut config = Config::default();
@@ -852,10 +872,8 @@ fn workspace_state_text_does_not_stack_terminal_faint() {
     let buffer = frame.to_ratatui_buffer().expect("workspace sidebar buffer");
     let (x, y) = cell_symbol_position(&frame, rect, "idle");
     let cell = buffer.cell((x, y)).expect("workspace state text cell");
-    assert!(
-        !cell.modifier.contains(Modifier::DIM),
-        "workspace state text at ({x},{y}) should not stack terminal faint: {cell:?}"
-    );
+    assert!(cell.modifier.contains(Modifier::DIM), "{cell:?}");
+    assert_eq!(cell.fg, state.config.palette.green);
 }
 
 #[test]
@@ -921,6 +939,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
     projected.agent_view_label = Some("review".into());
     projected.agent_order = vec!["pane_2".into(), "pane_3".into()];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    // the tree lists every agent under its space; the filtered order is the agents view's
+    state.sidebar_view = preferences::SidebarView::Agents;
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("filtered agent sidebar");
@@ -994,6 +1014,8 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
     let config =
         ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
     let mut state = ClientShellState::new(config);
+    // the sort control lives in the agents view, whose order it sets
+    state.sidebar_view = preferences::SidebarView::Agents;
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("agent sidebar frame");

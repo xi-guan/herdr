@@ -2324,7 +2324,7 @@ async fn run_client_loop(
                             write_stream.accepts(&expired.endpoint_id, expired.generation)
                         })
                         .collect::<Vec<_>>();
-                    let (effects, outcome, frame) = {
+                    let (effects, outcome, frame, spinner) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
                         for expired in expired_endpoints {
@@ -2345,11 +2345,13 @@ async fn run_client_loop(
                             | shell.tick_workspace_highlight(now)
                             | shell.tick_endpoint_error(now)
                             | shell.tick_claude_usage_countdown(std::time::SystemTime::now());
+                        // ticked before composing, so a full repaint draws the advanced frame
+                        let spinner = shell.tick_agent_spinner(now).filter(|_| !outcome.repaint);
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))
                             .flatten();
-                        (effects, outcome, frame)
+                        (effects, outcome, frame, spinner)
                     };
                     handle_shell_notification_effects(
                         effects,
@@ -2357,6 +2359,23 @@ async fn run_client_loop(
                         #[cfg(windows)]
                         &event_tx,
                     );
+                    if let Some(spinner) = spinner {
+                        let presented =
+                            state
+                                .present_spinner_repaint(spinner)
+                                .unwrap_or_else(|error| {
+                                    warn!(%error, "failed to present the sidebar spinner");
+                                    false
+                                });
+                        if !presented {
+                            let composed = state.shell.as_mut().and_then(|shell| {
+                                shell.compose(state.reported_size.0, state.reported_size.1)
+                            });
+                            if let Some(frame) = composed {
+                                state.present_frame(frame);
+                            }
+                        }
+                    }
                     if finish_client_shell_input(
                         &mut state,
                         outcome,
