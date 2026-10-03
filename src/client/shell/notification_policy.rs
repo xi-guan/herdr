@@ -53,7 +53,7 @@ impl ClientShellState {
         self.queued_notifications.push_back(notification);
     }
 
-    fn promote_queued_notification(&mut self, now: std::time::Instant) -> bool {
+    pub(super) fn promote_queued_notification(&mut self, now: std::time::Instant) -> bool {
         let Some(mut notification) = self.queued_notifications.pop_front() else {
             return false;
         };
