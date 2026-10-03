@@ -48,6 +48,9 @@ cli_params! {
         pub trust_repository: bool => Field::new(false)
             .input(bindings::boolean("trust-repository", true).order(8))
             .input(json_compatibility()),
+        /// Open a newly created worktree space as two side-by-side panes instead of one.
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        pub second_column: bool => Field::new(false),
     }
 }
 
@@ -72,6 +75,9 @@ cli_params! {
         pub trust_repository: bool => Field::new(false)
             .input(bindings::boolean("trust-repository", true).order(7))
             .input(json_compatibility()),
+        /// Open a newly created worktree space as two side-by-side panes instead of one.
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        pub second_column: bool => Field::new(false),
     }
 }
 

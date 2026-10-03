@@ -25,6 +25,10 @@ cli_params! {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         pub env: HashMap<String, String> => Field::new(HashMap::new())
             .input(bindings::environment().order(2)),
+        /// Open the space as two side-by-side panes instead of one. Off by default: a
+        /// caller states what it wants and can split afterwards if it means to.
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        pub second_column: bool => Field::new(false),
     }
 }
 

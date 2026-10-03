@@ -92,6 +92,7 @@ impl ClientShellState {
                                     focus: true,
                                     label: None,
                                     env: Default::default(),
+                                    second_column: true,
                                 },
                             ),
                             outcome,
