@@ -267,3 +267,4 @@ mod mouse_selection;
 mod popup_focus_projection;
 mod startup_overlays;
 mod status_colors;
+mod waiting_agents;

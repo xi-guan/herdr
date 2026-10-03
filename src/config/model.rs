@@ -375,7 +375,7 @@ pub struct KeysConfig {
     pub detach: BindingConfig,
     /// Reload config.toml in the running app/server. Default: "prefix+shift+r".
     pub reload_config: BindingConfig,
-    /// Focus the currently visible notification target. Default: "prefix+o".
+    /// Go to an agent waiting on you (blocked, or finished while you were away); press again for the next. Default: "prefix+o".
     pub open_notification_target: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
