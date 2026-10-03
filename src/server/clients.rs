@@ -135,6 +135,8 @@ pub(crate) struct ClientConnection {
     pub(crate) mode: ClientConnectionMode,
     /// The client's terminal size after clamping.
     pub(crate) terminal_size: (u16, u16),
+    /// columns of a shell surface the client keeps for its own chrome
+    pub(crate) shell_reserved_columns: u16,
     /// Pixel size of one client terminal cell.
     pub(crate) cell_size: crate::kitty_graphics::HostCellSize,
     /// Monotonic activity stamp used to choose the fallback foreground client.
@@ -226,6 +228,7 @@ impl ClientConnection {
         Self {
             mode,
             terminal_size,
+            shell_reserved_columns: 0,
             cell_size,
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
@@ -265,6 +268,15 @@ impl ClientConnection {
 
     pub(crate) fn request_recompute(&mut self) {
         self.render_state.request_recompute();
+    }
+
+    /// this client's pane surface with the columns it keeps for itself.
+    pub(crate) fn surface_area(&self) -> crate::ui::SurfaceArea {
+        let (cols, rows) = self.terminal_size;
+        crate::ui::SurfaceArea::new(
+            ratatui::layout::Rect::new(0, 0, cols, rows),
+            self.shell_reserved_columns,
+        )
     }
 
     pub(crate) fn track_shell_input(

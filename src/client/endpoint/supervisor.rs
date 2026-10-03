@@ -25,6 +25,7 @@ pub(crate) struct EndpointConnectOptions {
     pub(crate) pixel_geometry_exact: bool,
     pub(crate) pixel_mouse: bool,
     pub(crate) surface_size: ClientSurfaceSize,
+    pub(crate) surface_reserved_columns: u16,
     pub(crate) endpoint_keybindings: bool,
     pub(crate) mouse_capture: bool,
 }
@@ -493,7 +494,7 @@ fn connect_once(
             exact_geometry: options.pixel_geometry_exact,
             sgr_mouse: options.pixel_mouse,
         },
-        Some(options.surface_size),
+        Some((options.surface_size, options.surface_reserved_columns)),
         options.endpoint_keybindings,
         options.mouse_capture,
         false,
@@ -583,6 +584,7 @@ mod tests {
             pixel_geometry_exact: false,
             pixel_mouse: false,
             surface_size: ClientSurfaceSize { cols: 80, rows: 24 },
+            surface_reserved_columns: 0,
             endpoint_keybindings: false,
             mouse_capture: false,
         }

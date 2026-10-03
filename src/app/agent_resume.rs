@@ -148,7 +148,9 @@ impl App {
     ) -> Vec<crate::layout::PaneInfo> {
         let mut pane_infos = derived_pending_agent_resume_pane_infos(
             tab,
-            terminal_area,
+            crate::ui::SurfaceArea::new(terminal_area, self.state.view.reserved_columns)
+                .tab_area(tab)
+                .0,
             self.state.pane_borders,
             self.state.pane_gaps,
             self.state.pane_outer_borders,
@@ -320,13 +322,13 @@ impl App {
 
 fn derived_pending_agent_resume_pane_infos(
     tab: &crate::workspace::Tab,
-    terminal_area: Rect,
+    pane_area: crate::layout::PaneArea,
     pane_borders: crate::config::PaneBordersConfig,
     pane_gaps: bool,
     pane_outer_borders: bool,
 ) -> Vec<crate::layout::PaneInfo> {
     crate::ui::apply_pane_chrome(
-        tab.layout.panes(terminal_area),
+        tab.layout.panes_in(pane_area),
         pane_borders,
         pane_gaps,
         pane_outer_borders,
