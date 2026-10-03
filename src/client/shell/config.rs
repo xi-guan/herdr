@@ -402,11 +402,12 @@ impl ClientShellConfig {
                     rows.saturating_sub(tab_height),
                 ),
             ),
+            // the bar shares its row with the sidebar's footer, so it starts a column in
             TabBarPositionConfig::Bottom => (
                 Rect::new(
-                    main.x,
+                    main.x.saturating_add(1),
                     rows.saturating_sub(tab_height),
-                    main.width,
+                    main.width.saturating_sub(1),
                     tab_height,
                 ),
                 Rect::new(main.x, 0, main.width, rows.saturating_sub(tab_height)),
@@ -493,6 +494,31 @@ mod tests {
             shell.keybinds.prefix,
             vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]
         );
+    }
+
+    // switching tabs means looking at the bar, and at the bottom it sits next to the prompt
+    #[test]
+    fn the_tab_bar_can_sit_under_the_panes_instead_of_over_them() {
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        let area = Rect::new(0, 0, 80, 24);
+        let sidebar_width = config.sidebar_width;
+
+        let top = config
+            .layout(area.width, area.height, false, 2, sidebar_width)
+            .tab_bar;
+
+        config.tab_bar_position = TabBarPositionConfig::Bottom;
+        let bottom = config
+            .layout(area.width, area.height, false, 2, sidebar_width)
+            .tab_bar;
+
+        assert_eq!(top.height, 1);
+        assert_eq!(bottom.height, 1);
+        assert!(bottom.y > top.y, "top: {top:?} bottom: {bottom:?}");
+        assert_eq!(bottom.y + bottom.height, area.y + area.height);
+        // a column of air so the bar does not butt against the sidebar footer sharing its row
+        assert_eq!(bottom.x, top.x + 1);
+        assert_eq!(bottom.width, top.width - 1);
     }
 
     #[test]

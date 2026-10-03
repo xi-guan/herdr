@@ -5,6 +5,56 @@ const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 const MIN_TAB_STRIP_WIDTH: u16 =
     MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2);
 
+// lifted off the bar itself so the chip keeps its edges in light and dark themes alike
+fn tab_chip_bg(palette: &Palette) -> ratatui::style::Color {
+    const FLOOR: f32 = 1.15;
+
+    match crate::color::color_to_rgb(palette.panel_bg).zip(crate::color::color_to_rgb(palette.text))
+    {
+        Some(_) => crate::color::lift_until_legible(
+            palette.panel_bg,
+            palette.text,
+            palette.panel_bg,
+            FLOOR,
+        ),
+        // the theme leaves both to the terminal; surface_dim is always a concrete wash
+        None => palette.surface_dim,
+    }
+}
+
+fn tab_chip_style(
+    focused: bool,
+    custom_label: bool,
+    chip: ratatui::style::Color,
+    palette: &Palette,
+) -> Style {
+    if focused {
+        let base = Style::default()
+            .fg(panel_contrast_fg(palette))
+            .bg(palette.accent);
+        if custom_label {
+            base.add_modifier(Modifier::BOLD)
+        } else {
+            base
+        }
+    } else {
+        // an unnamed tab recedes a tier, but never below what reads on its chip
+        let quiet = if custom_label {
+            palette.overlay1
+        } else {
+            palette.overlay0
+        };
+        Style::default()
+            .fg(crate::color::lift_until_legible(
+                quiet,
+                palette.text,
+                chip,
+                2.5,
+            ))
+            .bg(chip)
+    }
+}
+
 pub(crate) fn render_tab_bar(
     buffer: &mut Buffer,
     area: Rect,
@@ -17,11 +67,15 @@ pub(crate) fn render_tab_bar(
 ) {
     let palette = &config.palette;
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
-    let tabs = snapshot
+    let mut tabs = snapshot
         .tabs
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
+    // a lone tab reading only its number is no choice, so the bar is left to `+` and the usage
+    if matches!(tabs.as_slice(), [only] if !only.custom_label && !only.zoomed) {
+        tabs.clear();
+    }
     let desired_widths = tabs
         .iter()
         .map(|tab| {
@@ -31,6 +85,7 @@ pub(crate) fn render_tab_bar(
         .collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
     let mouse_chrome = config.mouse_capture;
+    let chip = tab_chip_bg(palette);
     let new_tab_width = if mouse_chrome { NEW_TAB_WIDTH } else { 0 };
     let desired_total = desired_widths
         .iter()
@@ -80,7 +135,7 @@ pub(crate) fn render_tab_bar(
                 } else {
                     palette.overlay0
                 })
-                .bg(palette.surface0),
+                .bg(chip),
         );
         x = hits.tab_scroll_left.right();
         content
@@ -101,20 +156,7 @@ pub(crate) fn render_tab_bar(
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
-        let style = if tab.focused {
-            let base = Style::default()
-                .fg(panel_contrast_fg(palette))
-                .bg(palette.accent);
-            if tab.custom_label {
-                base.add_modifier(Modifier::BOLD)
-            } else {
-                base
-            }
-        } else if tab.custom_label {
-            Style::default().fg(palette.overlay1).bg(palette.surface0)
-        } else {
-            Style::default().fg(palette.overlay0).bg(palette.surface0)
-        };
+        let style = tab_chip_style(tab.focused, tab.custom_label, chip, palette);
         let padding = width.saturating_sub(display_width(&name));
         let left = padding / 2;
         let text = format!(
@@ -148,7 +190,7 @@ pub(crate) fn render_tab_bar(
                 } else {
                     palette.overlay0
                 })
-                .bg(palette.surface0),
+                .bg(chip),
         );
         hits.new_tab = Rect::new(
             hits.tab_scroll_right.right(),
@@ -544,6 +586,89 @@ mod tests {
         compact_tokens, reset_label, reset_label_changes_in, resets_in, usage_groups,
         usage_percent_color, usage_window_label, ClientShellUsageWindow,
     };
+    use super::{
+        render_tab_bar, tab_chip_bg, tab_chip_style, Buffer, ClientShellConfig,
+        ClientShellSnapshot, Config, Modifier, Rect, ShellHitMap,
+    };
+
+    fn render_bar(projected: &ClientShellSnapshot, hits: &mut ShellHitMap, width: u16) -> String {
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        config.mouse_capture = true;
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        let (mut scroll, mut reveal) = (0, true);
+        render_tab_bar(
+            &mut buffer,
+            area,
+            projected,
+            &config,
+            &mut scroll,
+            &mut reveal,
+            None,
+            hits,
+        );
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn a_lone_numbered_tab_leaves_the_bar_to_the_plus() {
+        let mut projected = crate::client::shell::tests::snapshot();
+        let mut hits = ShellHitMap::default();
+
+        let row = render_bar(&projected, &mut hits, 30);
+
+        assert_eq!(row.trim(), "+", "bar row: {row:?}");
+        // no chip means no way to click one, so the hit area has to go with it
+        assert!(hits.tabs.is_empty());
+
+        // a name is different: you gave it one for a reason
+        projected.tabs[0].label = "logs".into();
+        projected.tabs[0].custom_label = true;
+        let mut hits = ShellHitMap::default();
+
+        assert!(render_bar(&projected, &mut hits, 30).contains("logs"));
+    }
+
+    // the inactive chip is the one that broke: muted ink with DIM on a surface the theme left unset
+    #[test]
+    fn every_tab_stays_legible_on_its_own_chip() {
+        const INK_FLOOR: f32 = 2.5;
+        const CHIP_FLOOR: f32 = 1.1;
+        let mut checked = 0;
+
+        for name in crate::config::THEME_NAMES {
+            let p = crate::app::state::Palette::from_name(name).expect("named theme resolves");
+            for custom_label in [true, false] {
+                for focused in [true, false] {
+                    let style = tab_chip_style(focused, custom_label, tab_chip_bg(&p), &p);
+                    let (Some(ink), Some(chip)) = (style.fg, style.bg) else {
+                        panic!("{name}: a tab always sets both colours");
+                    };
+                    assert!(!style.add_modifier.contains(Modifier::DIM));
+                    if let Some(ratio) = crate::color::contrast_ratio(ink, chip) {
+                        checked += 1;
+                        assert!(
+                            ratio >= INK_FLOOR,
+                            "{name}: focused={focused} named={custom_label} label is {ratio:.2}:1"
+                        );
+                    }
+                    // without separation from the bar the tab has no edges and reads as loose text
+                    if let Some(ratio) = crate::color::contrast_ratio(chip, p.panel_bg) {
+                        assert!(
+                            ratio >= CHIP_FLOOR,
+                            "{name}: chip on the bar is {ratio:.2}:1"
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(checked > 50, "only {checked} pairs were resolvable");
+    }
 
     // 2026-08-01T12:00:00Z; every helper below takes the clock as an argument
     const NOON: u64 = 1_785_585_600;

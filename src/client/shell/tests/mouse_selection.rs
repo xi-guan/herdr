@@ -1095,7 +1095,10 @@ fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
 #[test]
 fn tab_wheel_switches_tabs_without_changing_overflow_scroll() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
+    let mut projected = snapshot();
+    // a named tab, because a lone numbered one leaves the bar to the plus
+    projected.tabs[0].custom_label = true;
+    state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("tab bar");
     let tab = state.hits.tabs[0].0;
@@ -1123,7 +1126,10 @@ fn tab_wheel_switches_tabs_without_changing_overflow_scroll() {
 #[test]
 fn context_menu_keyboard_and_outside_click_are_client_owned() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
+    let mut projected = snapshot();
+    // a named tab, because a lone numbered one leaves the bar to the plus
+    projected.tabs[0].custom_label = true;
+    state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("composed frame");
     let tab = state.hits.tabs[0].0;
