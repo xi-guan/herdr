@@ -14,8 +14,19 @@ pub(super) struct ClientRemoteCollapsedGroups {
     pub(super) collapsed_groups: Vec<String>,
 }
 
+/// which view fills the expanded single-machine sidebar; they share its full height.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SidebarView {
+    #[default]
+    Spaces,
+    Agents,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ClientChromePreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sidebar_view: Option<SidebarView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

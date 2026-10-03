@@ -72,25 +72,31 @@ fn workspace_rect(state: &ClientShellState, endpoint: &ClientEndpointId, workspa
 }
 
 #[test]
-fn local_navigation_highlight_stays_visible_with_terminal_theme() {
+fn local_navigation_cursor_keeps_its_mark_with_terminal_theme() {
     use ratatui::style::Color;
 
     for compact in [false, true] {
+        // the single-machine sidebar draws its cursor in surface0 whatever selection_bg says
         for selection_bg in [Color::Reset, Color::Rgb(70, 63, 93)] {
             let mut config = ClientShellConfig::from_config(&Config::default());
             config.palette = Palette::terminal();
             config.palette.selection_bg = selection_bg;
-            let expected_bg = if selection_bg == Color::Reset {
-                config.palette.active_row_bg
-            } else {
-                selection_bg
-            };
             let mut state = ClientShellState::new(config);
             state.set_snapshot(Box::new(workspaces(3)));
             state.set_pane_surface(surface());
             state.sidebar_collapsed = compact;
             state.compose(100, 28).unwrap();
             enter_navigation(&mut state);
+            let palette = state.config.palette.clone();
+            // the terminal theme leaves surface0 to the terminal, so the mark is what shows
+            let marked = |buffer: &ratatui::buffer::Buffer, rect: Rect| {
+                if compact {
+                    buffer[(rect.x, rect.y)].fg == palette.overlay1
+                } else {
+                    let mark = &buffer[(rect.right() - 1, rect.y)];
+                    mark.symbol() == "┃" && mark.fg == palette.accent
+                }
+            };
 
             for workspace_id in ["ws_1", "ws_2"] {
                 assert_selected(&state, &ClientEndpointId::Local, workspace_id);
@@ -100,24 +106,21 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
                     for x in selected.x..selected.right() {
                         assert_eq!(
                             buffer[(x, y)].bg,
-                            expected_bg,
+                            palette.surface0,
                             "compact={compact}, {workspace_id}, ({x}, {y})"
                         );
                     }
                 }
+                assert!(
+                    marked(&buffer, selected),
+                    "compact={compact}, {workspace_id}"
+                );
                 let untouched = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
-                assert_ne!(buffer[(untouched.x, untouched.y)].bg, expected_bg);
+                assert!(!marked(&buffer, untouched), "compact={compact}");
                 if workspace_id != "ws_1" {
+                    // the focused space keeps its own fill beside the cursor
                     let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
-                    assert_eq!(
-                        buffer[(focused.x, focused.y)].bg,
-                        if selection_bg == Color::Reset {
-                            state.config.palette.sidebar_bg
-                        } else {
-                            state.config.palette.active_row_bg
-                        }
-                    );
-                    assert_ne!(buffer[(focused.x, focused.y)].bg, expected_bg);
+                    assert_eq!(buffer[(focused.x, focused.y)].bg, palette.active_row_bg);
                 }
                 preview_key(&mut state, b"\x1b[B");
             }
@@ -133,15 +136,10 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
             preview_key(&mut state, b"\x1b");
             let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
             let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
-            assert_eq!(
-                buffer[(focused.x, focused.y)].bg,
-                state.config.palette.active_row_bg
-            );
+            assert_eq!(buffer[(focused.x, focused.y)].bg, palette.active_row_bg);
             let cancelled = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
-            assert_eq!(
-                buffer[(cancelled.x, cancelled.y)].bg,
-                state.config.palette.sidebar_bg
-            );
+            assert_eq!(buffer[(cancelled.x, cancelled.y)].bg, palette.sidebar_bg);
+            assert!(!marked(&buffer, cancelled));
         }
     }
 }
@@ -588,6 +586,8 @@ fn aggregate_navigation_reveals_overflow_and_preserves_order() {
 fn local_navigation_state(compact: bool) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.config.palette = Palette::terminal();
+    // the terminal theme's cursor tier is the terminal's own background; give it a colour to find
+    state.config.palette.surface0 = ratatui::style::Color::Rgb(70, 63, 93);
     state.sidebar_collapsed = compact;
     state.set_snapshot(Box::new(workspaces(3)));
     state.set_pane_surface(surface());
@@ -611,17 +611,49 @@ fn request_local_navigation(state: &mut ClientShellState, down: usize) -> String
     request.id.clone()
 }
 
+/// one row reads as the target: the pending cursor, else the focused space or its focused agent row.
 fn assert_local_highlight(state: &mut ClientShellState, selected_id: &str) {
     let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
-    for workspace_id in ["ws_1", "ws_2", "ws_3"] {
-        let rect = workspace_rect(state, &ClientEndpointId::Local, workspace_id);
-        assert_eq!(
-            (rect.x..rect.right())
-                .any(|x| buffer[(x, rect.y)].bg == state.config.palette.active_row_bg),
-            workspace_id == selected_id,
-            "expected only {selected_id} highlighted, checking {workspace_id}"
-        );
-    }
+    let palette = state.config.palette.clone();
+    let filled =
+        |rect: Rect, color| (rect.x..rect.right()).any(|x| buffer[(x, rect.y)].bg == color);
+    let workspace_ids = ["ws_1", "ws_2", "ws_3"];
+    let cursor = workspace_ids
+        .into_iter()
+        .filter(|id| {
+            filled(
+                workspace_rect(state, &ClientEndpointId::Local, id),
+                palette.surface0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let marked = if cursor.is_empty() {
+        let snapshot = state.snapshot.as_deref().unwrap();
+        let mut focused = workspace_ids
+            .into_iter()
+            .filter(|id| {
+                filled(
+                    workspace_rect(state, &ClientEndpointId::Local, id),
+                    palette.active_row_bg,
+                ) || state.hits.agents.iter().any(|(rect, pane_id)| {
+                    filled(*rect, palette.surface_dim)
+                        && snapshot
+                            .agents
+                            .iter()
+                            .any(|agent| agent.pane_id == *pane_id && agent.workspace_id == *id)
+                })
+            })
+            .collect::<Vec<_>>();
+        focused.dedup();
+        focused
+    } else {
+        cursor
+    };
+    assert_eq!(
+        marked,
+        [selected_id],
+        "expected only {selected_id} highlighted"
+    );
 }
 
 fn set_local_focus(state: &mut ClientShellState, workspace_id: &str, revision: u64) {

@@ -7,7 +7,7 @@ pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
 mod tabs;
 
-pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
+pub(super) use super::agent_sidebar::ordered_agent_pane_ids;
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
 pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
@@ -248,6 +248,10 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) navigating: bool,
+    pub(super) sidebar_view: super::preferences::SidebarView,
+    pub(super) pending_tree_reveal: &'a mut Option<TreeReveal>,
+    pub(super) spinner_frame: u64,
 }
 
 pub(super) fn render_shell(
@@ -288,16 +292,7 @@ pub(super) fn render_shell(
                 );
             }
         } else if state.sidebar_collapsed {
-            render_collapsed_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                state
-                    .selected_workspace_id
-                    .map(|target| target.workspace_id.as_str()),
-                &mut hits,
-            );
+            render_collapsed_sidebar(buffer, layout.sidebar, snapshot, config, &state, &mut hits);
         } else {
             render_sidebar(
                 buffer,
@@ -327,6 +322,7 @@ pub(super) fn render_shell(
         hits.workspace_scrollbar = Rect::default();
         hits.agent_scrollbar = Rect::default();
         hits.agent_sort_toggle = Rect::default();
+        hits.sidebar_view_tabs.clear();
         hits.new_workspace = Rect::default();
         hits.machines.clear();
         hits.workspaces.clear();

@@ -957,9 +957,15 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    state.compose(106, 20).expect("overflowing sidebars");
 
     for agent in [false, true] {
+        // each view fills the sidebar with its own list and its own scrollbar
+        state.sidebar_view = if agent {
+            preferences::SidebarView::Agents
+        } else {
+            preferences::SidebarView::Spaces
+        };
+        state.compose(106, 20).expect("overflowing sidebar");
         let (track, metrics) = if agent {
             (
                 state.hits.agent_scrollbar,

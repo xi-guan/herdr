@@ -77,6 +77,10 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            spinner_frame: self.agent_spinner_frame,
+            navigating: self.mode == ClientShellMode::Navigate,
+            sidebar_view: self.sidebar_view,
+            pending_tree_reveal: &mut self.pending_tree_reveal,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -148,6 +152,24 @@ impl ClientShellState {
     }
 
     pub(crate) fn compose(
+        &mut self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<crate::client::frame_output::ComposedFrame> {
+        let composed = self.compose_frame(cols, rows);
+        match composed.as_ref() {
+            Some(composed) => spinner::settle(
+                &mut self.hits.spinner_cells,
+                &composed.frame,
+                self.agent_spinner_frame,
+            ),
+            // a compose that stopped partway drew marks no frame will show
+            None => self.hits.spinner_cells.retain(|cell| cell.cell.is_some()),
+        }
+        composed
+    }
+
+    fn compose_frame(
         &mut self,
         cols: u16,
         rows: u16,
@@ -233,6 +255,10 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                spinner_frame: self.agent_spinner_frame,
+                navigating: self.mode == ClientShellMode::Navigate,
+                sidebar_view: self.sidebar_view,
+                pending_tree_reveal: &mut self.pending_tree_reveal,
             },
         );
         self.hits.panes = surface
