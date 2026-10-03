@@ -138,6 +138,8 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) release_notes_max_scroll: usize,
+    // wall clock, since the countdown it refreshes is measured against a wall-clock reset
+    pub(super) claude_usage_repaint_at: Option<std::time::SystemTime>,
 }
 
 #[derive(Clone)]
@@ -1863,6 +1865,18 @@ impl ClientShellState {
             return true;
         }
         false
+    }
+
+    // cleared once due, so a compose that bails out early does not ask for a repaint every tick
+    pub(crate) fn tick_claude_usage_countdown(&mut self, now: std::time::SystemTime) -> bool {
+        let due = self
+            .hits
+            .claude_usage_repaint_at
+            .is_some_and(|at| now >= at);
+        if due {
+            self.hits.claude_usage_repaint_at = None;
+        }
+        due
     }
 
     pub(crate) fn timer_delay(&self, now: std::time::Instant) -> std::time::Duration {

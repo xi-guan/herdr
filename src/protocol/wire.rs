@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -975,6 +975,23 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    // optional so the frozen v1 snapshot and servers without it still decode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_usage: Option<ClientShellClaudeUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellClaudeUsage {
+    pub windows: Vec<ClientShellUsageWindow>,
+    pub seven_day_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellUsageWindow {
+    pub label: String,
+    pub percent: u8,
+    // unix seconds: the client derives the countdown, so the snapshot does not change every minute
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2893,6 +2910,14 @@ mod tests {
                 action: ClientShellCommandAction::Shell,
                 description: Some("deploy".into()),
             }],
+            claude_usage: Some(ClientShellClaudeUsage {
+                windows: vec![ClientShellUsageWindow {
+                    label: "five_hour".into(),
+                    percent: 3,
+                    resets_at: Some(1_785_588_600),
+                }],
+                seven_day_tokens: Some(31_000_000),
+            }),
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

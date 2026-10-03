@@ -193,6 +193,15 @@ pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<b
     Ok(false)
 }
 
+// outside macos claude code keeps its oauth credential blob in a file under the home directory
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn claude_credentials() -> Option<String> {
+    let path = crate::integration::env::home_dir()
+        .ok()?
+        .join(".claude/.credentials.json");
+    std::fs::read_to_string(path).ok()
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;

@@ -247,6 +247,7 @@ mod tests {
             panes: Vec::new(),
             agents: Vec::new(),
             commands: Vec::new(),
+            claude_usage: None,
         }
     }
 
@@ -302,6 +303,8 @@ mod tests {
             panic!("snapshot should use endpoint control");
         };
         assert_eq!(kind, ENDPOINT_SNAPSHOT_KIND);
+        // an absent reading stays off the wire, so older clients see the v1 shape unchanged
+        assert!(!data.contains("claude_usage"));
         let decoded: ClientShellSnapshot = serde_json::from_str(&data).unwrap();
         assert_eq!(decoded, snapshot);
     }

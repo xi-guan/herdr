@@ -3233,6 +3233,7 @@ impl HeadlessServer {
 
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
+            self.app.run_claude_usage_polls_if_due(now);
         }
 
         if self

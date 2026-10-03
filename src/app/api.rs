@@ -38,6 +38,7 @@ impl App {
                 segment_index,
                 result,
             } => self.handle_tab_bar_command_finished(generation, segment_index, result),
+            AppEvent::ClaudeUsage(ev) => self.handle_claude_usage_event(ev),
             AppEvent::WorktreeReadFinished(result) => {
                 let changes_workspace = matches!(
                     &result.request.method,
@@ -130,6 +131,11 @@ impl App {
         } = ev
         {
             let _ = self.handle_tab_bar_command_finished(generation, segment_index, result);
+            return Vec::new();
+        }
+
+        if let AppEvent::ClaudeUsage(ev) = ev {
+            let _ = self.handle_claude_usage_event(ev);
             return Vec::new();
         }
 
