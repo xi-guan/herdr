@@ -11,8 +11,12 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::text::display_width;
 use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
+use crate::api::schema::AgentStatus;
 use crate::app::state::Palette;
 use crate::app::AppState;
+use crate::color::{
+    attention_color, contrast_ratio, ground_pole, lift_until_legible, nudge_toward,
+};
 use crate::layout::{PaneId, PaneInfo};
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
@@ -577,34 +581,144 @@ fn render_pane_borders(
     }
     add_split_border_cells(app.pane_gaps, split_borders, &mut cells);
 
+    // resolved per pane, never per cell: the lookups and contrast maths would run on every edge
+    let resting_color = border_color(None, false, &app.palette);
+    // a layout focuses exactly one pane, so it is found once rather than per cell
+    let focused = pane_infos.iter().find(|info| info.is_focused);
+    let focused_color = focused.map_or(app.palette.accent, |info| {
+        border_color(pane_agent_status(app, ws, info.id), true, &app.palette)
+    });
+    let touches_focused =
+        |x: u16, y: u16| focused.is_some_and(|info| line_touches_pane(x, y, info, app.pane_gaps));
     let buf = frame.buffer_mut();
     let area = buf.area;
-    for ((x, y), line) in cells {
-        if x < area.x
-            || x >= area.x.saturating_add(area.width)
-            || y < area.y
-            || y >= area.y.saturating_add(area.height)
-        {
-            continue;
-        }
-        let focused = pane_infos
-            .iter()
-            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let symbol = line_cell_symbol(line);
-        if symbol.is_empty() {
+    let drawn = |x: u16, y: u16, line: LineCell| {
+        x >= area.x
+            && x < area.x.saturating_add(area.width)
+            && y >= area.y
+            && y < area.y.saturating_add(area.height)
+            && !line_cell_symbol(line).is_empty()
+    };
+    for (&(x, y), &line) in &cells {
+        if !drawn(x, y, line) {
             continue;
         }
         let cell = &mut buf[(x, y)];
-        cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
+        cell.set_symbol(line_cell_symbol(line));
+        let color = if touches_focused(x, y) {
+            focused_color
         } else {
-            app.palette.overlay0
+            resting_color
         };
         cell.set_style(Style::default().fg(color));
     }
 
+    // an unfocused cell belongs to the last pane touching it; nothing to repaint until one is loud
+    let mut loud_seen = false;
+    for info in pane_infos.iter().filter(|info| !info.is_focused) {
+        let status = pane_agent_status(app, ws, info.id);
+        let loud = status
+            .and_then(|status| attention_color(status, &app.palette))
+            .is_some();
+        loud_seen |= loud;
+        if !loud_seen {
+            continue;
+        }
+        let color = if loud {
+            border_color(status, false, &app.palette)
+        } else {
+            resting_color
+        };
+        for_each_touched_cell(info, app.pane_gaps, |x, y| {
+            if cells
+                .get(&(x, y))
+                .is_some_and(|line| drawn(x, y, *line) && !touches_focused(x, y))
+            {
+                buf[(x, y)].set_style(Style::default().fg(color));
+            }
+        });
+    }
+
     render_pane_border_titles(app, ws, pane_infos, frame);
+}
+
+/// what the border says: colour for the agent wanting you, brightness for the keyboard.
+fn border_color(status: Option<AgentStatus>, focused: bool, p: &Palette) -> Color {
+    // far enough to lose to the focused edge; at 0.55 an unfocused border sat at 1.48:1
+    const DIM: f32 = 0.25;
+
+    let Some(base) = status.and_then(|status| attention_color(status, p)) else {
+        // the accent is spent on the pane holding the keyboard, or the emptiest edge is loudest
+        if focused {
+            return p.accent;
+        }
+        // lifting an ANSI grey lands on plain white, so only a concrete one is lifted
+        let quiet = p.overlay0;
+        return match contrast_ratio(quiet, p.panel_bg) {
+            Some(ratio) if ratio < FAINTEST_BORDER => {
+                lift_until_legible(quiet, p.text, p.panel_bg, FAINTEST_BORDER)
+            }
+            _ => quiet,
+        };
+    };
+    // worn plain so the agent reads as one shade on its border and its sidebar bar
+    if focused {
+        return base;
+    }
+    // a pale accent on a pale ground is erased by a fixed step, so walk back until it reads
+    let dimmed = nudge_toward(base, ground_pole(p.panel_bg), DIM);
+    lift_until_legible(dimmed, base, p.panel_bg, FAINTEST_BORDER)
+}
+
+/// an unfocused edge's floor on `panel_bg`, which stands in for the ground bare border cells show.
+const FAINTEST_BORDER: f32 = 1.8;
+
+fn pane_agent_status(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    pane_id: PaneId,
+) -> Option<AgentStatus> {
+    let pane = ws.pane_state(pane_id)?;
+    let terminal = app.terminals.get(&pane.attached_terminal_id)?;
+    // a completion you just reached keeps its colour until the hold expires or you type
+    let held = app.acknowledged_at.contains_key(&pane.attached_terminal_id);
+    Some(crate::app::pane_agent_status(
+        terminal.state,
+        pane.seen && !held,
+    ))
+}
+
+/// visits every cell `line_touches_pane` accepts for this pane, corners possibly twice.
+fn for_each_touched_cell(info: &PaneInfo, pane_gaps: bool, mut visit: impl FnMut(u16, u16)) {
+    let rect = info.rect;
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let right = rect.x.saturating_add(rect.width).saturating_sub(1);
+    let bottom = rect.y.saturating_add(rect.height).saturating_sub(1);
+    let shared = (!pane_gaps).then(|| {
+        (
+            rect.x.saturating_add(rect.width),
+            rect.y.saturating_add(rect.height),
+        )
+    });
+    for x in rect.x..=right {
+        visit(x, rect.y);
+        visit(x, bottom);
+        if let Some((_, shared_bottom)) = shared {
+            visit(x, shared_bottom);
+        }
+    }
+    for y in rect.y..=bottom {
+        visit(rect.x, y);
+        visit(right, y);
+        if let Some((shared_right, _)) = shared {
+            visit(shared_right, y);
+        }
+    }
+    if let Some((shared_right, shared_bottom)) = shared {
+        visit(shared_right, shared_bottom);
+    }
 }
 
 fn add_split_border_cells(
@@ -890,7 +1004,7 @@ fn selection_fg_for_bg(bg: Color, p: &Palette) -> Color {
         .unwrap_or_else(|| panel_contrast_fg(p))
 }
 
-fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
+pub(crate) fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
     fn channel(base: u8, target: u8, amount: f32) -> u8 {
         (f32::from(base) + (f32::from(target) - f32::from(base)) * amount).round() as u8
     }
@@ -901,7 +1015,7 @@ fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
     )
 }
 
-fn relative_luminance(color: Rgb) -> f32 {
+pub(crate) fn relative_luminance(color: Rgb) -> f32 {
     fn channel(value: u8) -> f32 {
         let value = f32::from(value) / 255.0;
         if value <= 0.03928 {
@@ -913,7 +1027,7 @@ fn relative_luminance(color: Rgb) -> f32 {
     0.2126 * channel(color.0) + 0.7152 * channel(color.1) + 0.0722 * channel(color.2)
 }
 
-fn color_to_rgb(color: Color) -> Option<Rgb> {
+pub(crate) fn color_to_rgb(color: Color) -> Option<Rgb> {
     match color {
         Color::Reset => None,
         Color::Black => Some((0, 0, 0)),
@@ -941,6 +1055,7 @@ fn color_to_rgb(color: Color) -> Option<Rgb> {
 mod tests {
     use super::*;
     use crate::config::PaneBordersConfig;
+    use crate::detect::AgentState;
     use crate::layout::PaneId;
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
@@ -1304,6 +1419,279 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
+    }
+
+    const BORDER_STATES: [Option<AgentStatus>; 5] = [
+        Some(AgentStatus::Blocked),
+        Some(AgentStatus::Working),
+        Some(AgentStatus::Done),
+        Some(AgentStatus::Idle),
+        None,
+    ];
+
+    #[test]
+    fn a_resting_unfocused_border_owes_nothing_to_the_accent() {
+        for name in crate::config::THEME_NAMES {
+            let p = Palette::from_name(name).expect("named theme resolves");
+            let mut repainted = p.clone();
+            repainted.accent = Color::Rgb(255, 0, 0);
+
+            assert_eq!(
+                border_color(None, false, &p),
+                border_color(None, false, &repainted),
+                "{name}: a resting unfocused border moved with the accent"
+            );
+            assert_eq!(
+                border_color(None, true, &repainted),
+                Color::Rgb(255, 0, 0),
+                "{name}: the focused pane stopped showing the accent"
+            );
+            assert_ne!(
+                border_color(Some(AgentStatus::Blocked), false, &p),
+                border_color(None, false, &p),
+                "{name}: a blocked pane went as quiet as one with nothing to say"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ansi_resting_border_keeps_the_grey_the_terminal_chose() {
+        let p = Palette::terminal();
+
+        assert!(
+            contrast_ratio(p.overlay0, p.panel_bg).is_none(),
+            "the terminal theme stopped using ANSI slots, so this no longer tests one"
+        );
+        assert_eq!(border_color(None, false, &p), p.overlay0);
+    }
+
+    #[test]
+    fn the_focused_pane_owns_the_louder_border_in_every_state() {
+        let mut compared = 0;
+
+        for name in crate::config::THEME_NAMES {
+            let p = Palette::from_name(name).expect("named theme resolves");
+            for status in BORDER_STATES {
+                let (Some(focused), Some(unfocused)) = (
+                    contrast_ratio(border_color(status, true, &p), p.panel_bg),
+                    contrast_ratio(border_color(status, false, &p), p.panel_bg),
+                ) else {
+                    continue;
+                };
+                compared += 1;
+                assert!(
+                    focused > unfocused,
+                    "{name}: focused {status:?} border is {focused:.2}:1 \
+                     against the unfocused {unfocused:.2}:1"
+                );
+                assert!(
+                    unfocused >= FAINTEST_BORDER,
+                    "{name}: unfocused {status:?} border is only {unfocused:.2}:1"
+                );
+            }
+        }
+
+        assert!(compared > 50, "only {compared} pairs were resolvable");
+    }
+
+    #[test]
+    fn touched_cells_are_exactly_the_cells_a_pane_touches() {
+        let info = PaneInfo {
+            id: PaneId::from_raw(1),
+            rect: Rect::new(2, 1, 4, 3),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: false,
+        };
+        for pane_gaps in [false, true] {
+            let mut visited = std::collections::HashSet::new();
+            for_each_touched_cell(&info, pane_gaps, |x, y| {
+                visited.insert((x, y));
+            });
+            for x in 0..10 {
+                for y in 0..8 {
+                    assert_eq!(
+                        visited.contains(&(x, y)),
+                        line_touches_pane(x, y, &info, pane_gaps),
+                        "({x}, {y}) with gaps {pane_gaps}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// three gapless panes in a row, the right one focused, each with an agent in `states`.
+    fn render_row_of_agents(states: [AgentState; 3]) -> (AppState, ratatui::buffer::Buffer) {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("row");
+        ws.test_split(Direction::Horizontal);
+        ws.test_split(Direction::Horizontal);
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let mut panes = app.workspaces[0].tabs[0]
+            .layout
+            .panes(Rect::new(0, 0, 12, 3));
+        panes.sort_by_key(|info| info.rect.x);
+        let rects = [
+            (
+                Rect::new(0, 0, 4, 3),
+                Borders::TOP | Borders::LEFT | Borders::BOTTOM,
+            ),
+            (
+                Rect::new(4, 0, 4, 3),
+                Borders::TOP | Borders::LEFT | Borders::BOTTOM,
+            ),
+            (Rect::new(8, 0, 4, 3), Borders::ALL),
+        ];
+        app.view.pane_infos = panes
+            .iter()
+            .zip(rects)
+            .enumerate()
+            .map(|(index, (info, (rect, borders)))| PaneInfo {
+                id: info.id,
+                rect,
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders,
+                is_focused: index == 2,
+            })
+            .collect();
+        for (info, state) in app.view.pane_infos.iter().zip(states) {
+            let terminal_id = app.workspaces[0].terminal_id(info.id).unwrap().clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Pi);
+            terminal.state = state;
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| render_view_pane_borders(&app, &app.workspaces[0], &[], frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (app, buffer)
+    }
+
+    #[test]
+    fn an_unfocused_agent_wears_its_state_on_the_edges_it_owns() {
+        let (app, buffer) =
+            render_row_of_agents([AgentState::Working, AgentState::Idle, AgentState::Idle]);
+        let p = &app.palette;
+        let working = Some(border_color(Some(AgentStatus::Working), false, p));
+        let resting = Some(border_color(None, false, p));
+
+        assert_eq!(buffer[(0, 1)].style().fg, working);
+        assert_eq!(buffer[(2, 0)].style().fg, working);
+        // a shared divider goes to the later pane, and the focused pane beats both
+        assert_eq!(buffer[(4, 1)].style().fg, resting);
+        assert_eq!(buffer[(6, 0)].style().fg, resting);
+        assert_eq!(buffer[(8, 1)].style().fg, Some(p.accent));
+
+        let (app, buffer) =
+            render_row_of_agents([AgentState::Idle, AgentState::Blocked, AgentState::Working]);
+        let p = &app.palette;
+        let blocked = Some(border_color(Some(AgentStatus::Blocked), false, p));
+        assert_eq!(
+            buffer[(0, 1)].style().fg,
+            Some(border_color(None, false, p))
+        );
+        assert_eq!(buffer[(4, 1)].style().fg, blocked);
+        assert_eq!(buffer[(6, 2)].style().fg, blocked);
+        assert_eq!(
+            buffer[(8, 1)].style().fg,
+            Some(border_color(Some(AgentStatus::Working), true, p))
+        );
+    }
+
+    fn finished_agent_in(
+        app: &mut AppState,
+        ws_idx: usize,
+    ) -> (PaneId, crate::terminal::TerminalId) {
+        let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.state = AgentState::Idle;
+        app.workspaces[ws_idx].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        (pane_id, terminal_id)
+    }
+
+    #[test]
+    fn switching_into_a_finished_agent_keeps_its_colour_on_arrival() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("elsewhere"),
+            Workspace::test_new("finished"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let (pane_id, _) = finished_agent_in(&mut app, 1);
+
+        app.switch_workspace(1);
+
+        assert_eq!(
+            pane_agent_status(&app, &app.workspaces[1], pane_id),
+            Some(AgentStatus::Done),
+            "still wearing the colour that brought you here"
+        );
+    }
+
+    #[test]
+    fn switching_to_a_finished_agents_tab_keeps_its_colour_on_arrival() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("tabs");
+        let finished_tab = ws.test_add_tab(Some("finished"));
+        ws.switch_tab(0);
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let pane_id = app.workspaces[0].tabs[finished_tab].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        app.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        app.workspaces[0].pane_state_mut(pane_id).unwrap().seen = false;
+
+        assert!(app.switch_workspace_tab(0, finished_tab));
+
+        assert!(app.workspaces[0].pane_state(pane_id).unwrap().seen);
+        assert_eq!(
+            pane_agent_status(&app, &app.workspaces[0], pane_id),
+            Some(AgentStatus::Done)
+        );
+    }
+
+    #[test]
+    fn a_completion_keeps_its_colour_for_a_moment_after_it_is_acknowledged() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let (pane_id, terminal_id) = finished_agent_in(&mut app, 0);
+        let status = |app: &AppState| pane_agent_status(app, &app.workspaces[0], pane_id);
+
+        assert_eq!(
+            status(&app),
+            Some(AgentStatus::Done),
+            "unseen before it is looked at"
+        );
+        assert!(app.mark_active_tab_seen());
+        assert_eq!(
+            status(&app),
+            Some(AgentStatus::Done),
+            "still wearing the colour it was reached in"
+        );
+
+        // a deadline the loop keeps asking for but nothing clears stays past and spins it
+        let held_at = app.acknowledged_at[&terminal_id];
+        assert!(!app.expire_acknowledged_holds(held_at));
+        assert!(app.expire_acknowledged_holds(held_at + AppState::ACKNOWLEDGED_HOLD));
+        assert!(app.next_acknowledged_hold_expiry().is_none());
+        assert_eq!(status(&app), Some(AgentStatus::Idle));
     }
 
     #[tokio::test]

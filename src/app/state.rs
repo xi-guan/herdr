@@ -819,6 +819,9 @@ pub struct AppState {
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
     pub pending_agent_notifications: std::collections::HashMap<PaneId, PendingAgentNotification>,
+    /// when a completion was reached; a server-drawn border timer, kept off the API and wire.
+    pub(crate) acknowledged_at:
+        std::collections::HashMap<crate::terminal::TerminalId, std::time::Instant>,
     /// Last reported focus state for the outer terminal hosting herdr.
     /// None means unsupported or not yet reported, which preserves active-pane suppression.
     pub outer_terminal_focus: Option<bool>,
@@ -894,8 +897,27 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// long enough to land in a space and read where you are; typing drops it sooner.
+    pub(crate) const ACKNOWLEDGED_HOLD: std::time::Duration = std::time::Duration::from_secs(8);
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// when the earliest hold runs out, so the loop repaints the border the moment it does.
+    pub(crate) fn next_acknowledged_hold_expiry(&self) -> Option<std::time::Instant> {
+        self.acknowledged_at
+            .values()
+            .map(|at| *at + Self::ACKNOWLEDGED_HOLD)
+            .min()
+    }
+
+    /// returns whether any hold ran out: a deadline nothing clears stays past and spins the loop.
+    pub(crate) fn expire_acknowledged_holds(&mut self, now: std::time::Instant) -> bool {
+        let before = self.acknowledged_at.len();
+        self.acknowledged_at
+            .retain(|_, at| now.duration_since(*at) < Self::ACKNOWLEDGED_HOLD);
+        self.acknowledged_at.len() != before
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1065,6 +1087,7 @@ impl AppState {
             config_diagnostic: None,
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),
+            acknowledged_at: std::collections::HashMap::new(),
             outer_terminal_focus: None,
             prefix_keys: vec![(KeyCode::Char('b'), KeyModifiers::CONTROL)],
             headless_size: (
