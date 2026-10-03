@@ -81,6 +81,7 @@ impl ClientShellState {
             navigating: self.mode == ClientShellMode::Navigate,
             sidebar_view: self.sidebar_view,
             pending_tree_reveal: &mut self.pending_tree_reveal,
+            selected_hidden_workspace: self.selected_hidden_workspace.as_deref(),
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -259,6 +260,7 @@ impl ClientShellState {
                 navigating: self.mode == ClientShellMode::Navigate,
                 sidebar_view: self.sidebar_view,
                 pending_tree_reveal: &mut self.pending_tree_reveal,
+                selected_hidden_workspace: self.selected_hidden_workspace.as_deref(),
             },
         );
         self.hits.panes = surface

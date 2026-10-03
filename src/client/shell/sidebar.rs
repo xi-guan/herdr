@@ -264,6 +264,16 @@ pub(crate) fn render_sidebar(
                 buffer, content, snapshot, config, state, hits,
             )
         }
+        super::super::preferences::SidebarView::Hidden => {
+            super::super::sidebar_tree::render_hidden_view(
+                buffer,
+                content,
+                snapshot,
+                state.selected_hidden_workspace,
+                palette,
+                hits,
+            )
+        }
         super::super::preferences::SidebarView::Agents => {
             super::super::agent_sidebar::render_local_agents_view(
                 buffer,

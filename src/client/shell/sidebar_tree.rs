@@ -10,9 +10,10 @@ use ratatui::{
 };
 
 /// the view tabs in order, so rects, labels and hit testing cannot drift apart.
-pub(super) const VIEW_TABS: [(SidebarView, &str); 2] = [
+pub(super) const VIEW_TABS: [(SidebarView, &str); 3] = [
     (SidebarView::Spaces, " spaces"),
     (SidebarView::Agents, "agents"),
+    (SidebarView::Hidden, "hidden"),
 ];
 const VIEW_TAB_SEPARATOR: &str = " │ ";
 
@@ -102,6 +103,90 @@ fn spaces_body_rect(content: Rect) -> Rect {
         content.width,
         footer_y.saturating_sub(body_y),
     )
+}
+
+/// the row the `row`-th hidden space lists on, or none once the body runs out of rows.
+pub(super) fn hidden_space_row_y(body: Rect, row: usize) -> Option<u16> {
+    let offset = u16::try_from(row).ok()?;
+    (offset < body.height).then_some(body.y + offset)
+}
+
+/// spaces put away: a name and where it lives, one row each, in the rows the tree would use.
+pub(super) fn render_hidden_view(
+    buffer: &mut Buffer,
+    content: Rect,
+    snapshot: &ClientShellSnapshot,
+    selected: Option<&str>,
+    palette: &Palette,
+    hits: &mut ShellHitMap,
+) {
+    let body = spaces_body_rect(content);
+    if body.is_empty() {
+        return;
+    }
+    if snapshot.hidden_workspaces.is_empty() {
+        Paragraph::new(" nothing hidden")
+            .style(
+                Style::default()
+                    .fg(palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            )
+            .render(Rect::new(body.x, body.y, body.width, 1), buffer);
+        return;
+    }
+    for (row, hidden) in snapshot.hidden_workspaces.iter().enumerate() {
+        let Some(y) = hidden_space_row_y(body, row) else {
+            break;
+        };
+        let picked = selected == Some(hidden.workspace_id.as_str());
+        let label = crate::ui::truncate_end(&hidden.label, body.width.saturating_sub(1) as usize);
+        let dir = std::path::Path::new(&hidden.cwd)
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_default();
+        let dir_width = body
+            .width
+            .saturating_sub(render::display_width(&label).saturating_add(2));
+        // the whole row inverts, as a menu's picked item does: there is no second line to mark
+        let (label_color, dir_color) = if picked {
+            (panel_contrast_fg(palette), panel_contrast_fg(palette))
+        } else {
+            (palette.subtext0, palette.overlay0)
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        // the parent directory only, and only when it fits: same names part by where they live
+        if dir_width > 4 && !dir.is_empty() {
+            let dir_style = Style::default().fg(dir_color);
+            spans.push(Span::styled(
+                format!(
+                    " {}",
+                    crate::ui::middle_elide(&dir, dir_width.saturating_sub(1) as usize)
+                ),
+                // dimming a colour already on the fill only muddies it
+                if picked {
+                    dir_style
+                } else {
+                    dir_style.add_modifier(Modifier::DIM)
+                },
+            ));
+        }
+        let mut line = Paragraph::new(Line::from(spans));
+        if picked {
+            line = line.style(Style::default().bg(palette.accent));
+        }
+        let rect = Rect::new(body.x, y, body.width, 1);
+        line.render(rect, buffer);
+        hits.hidden_workspaces
+            .push((rect, hidden.workspace_id.clone()));
+    }
 }
 
 /// enclosed forms say "which one"; past 20 Unicode stops enclosing and plain digits are left.

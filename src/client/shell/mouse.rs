@@ -1837,6 +1837,17 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if let Some(workspace_id) = self
+                    .hits
+                    .hidden_workspaces
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, workspace_id)| workspace_id.clone())
+                {
+                    self.open_hidden_workspace_context_menu(workspace_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -2028,6 +2039,18 @@ impl ClientShellState {
                         self.persist_chrome_preferences(outcome);
                         outcome.repaint = true;
                     }
+                    return;
+                }
+                // a left click only points at a put-away space; bringing one back takes the menu
+                if let Some(workspace_id) = self
+                    .hits
+                    .hidden_workspaces
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, workspace_id)| workspace_id.clone())
+                {
+                    self.selected_hidden_workspace = Some(workspace_id);
+                    outcome.repaint = true;
                     return;
                 }
                 if super::contains(self.hits.agent_sort_toggle, point) {

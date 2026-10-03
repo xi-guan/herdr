@@ -49,7 +49,8 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
         let preferences = preferences::ClientChromePreferences {
-            sidebar_view: (self.sidebar_view != preferences::SidebarView::Spaces)
+            // the hidden view is a place to visit, so only the agents view outlives a restart
+            sidebar_view: (self.sidebar_view == preferences::SidebarView::Agents)
                 .then_some(self.sidebar_view),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self

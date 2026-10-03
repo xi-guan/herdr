@@ -568,6 +568,16 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::WorkspaceRestore { workspace_id } => {
+                // a restored space is open again, so the sidebar follows it into the tree
+                if result.is_ok() && self.sidebar_view == super::preferences::SidebarView::Hidden {
+                    self.sidebar_view = super::preferences::SidebarView::Spaces;
+                    if self.selected_hidden_workspace.as_deref() == Some(workspace_id.as_str()) {
+                        self.selected_hidden_workspace = None;
+                    }
+                    return (true, Vec::new());
+                }
+            }
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {

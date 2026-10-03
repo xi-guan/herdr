@@ -148,6 +148,7 @@ pub(super) struct ShellHitMap {
     pub(super) claude_usage_repaint_at: Option<std::time::SystemTime>,
     pub(super) spinner_cells: Vec<spinner::SpinnerCell>,
     pub(super) sidebar_view_tabs: Vec<(Rect, preferences::SidebarView)>,
+    pub(super) hidden_workspaces: Vec<(Rect, String)>,
 }
 
 #[derive(Clone)]
@@ -536,6 +537,7 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    Restore,
 }
 
 #[derive(Debug)]
@@ -558,6 +560,9 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+    },
+    HiddenWorkspace {
+        workspace_id: String,
     },
 }
 
@@ -651,6 +656,9 @@ pub(super) enum PendingEndpointKind {
     WorktreeOpen,
     WorktreeRemove {
         forced: bool,
+    },
+    WorkspaceRestore {
+        workspace_id: String,
     },
     SelectionCopy,
     PaneScroll {
@@ -887,6 +895,7 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_section_split_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) sidebar_view: preferences::SidebarView,
+    pub(super) selected_hidden_workspace: Option<String>,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
@@ -1035,7 +1044,7 @@ impl ClientShellState {
         // the view tabs are mouse-only, so never restore into a view there is no way to leave
         let sidebar_view = preferences
             .sidebar_view
-            .filter(|_| config.mouse_capture)
+            .filter(|view| *view == preferences::SidebarView::Agents && config.mouse_capture)
             .unwrap_or_default();
         let mut remote_collapsed_groups = HashMap::<ClientEndpointId, HashSet<String>>::new();
         for saved in preferences.remote_collapsed_groups {
@@ -1069,6 +1078,7 @@ impl ClientShellState {
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             sidebar_view,
+            selected_hidden_workspace: None,
             last_sidebar_divider_click: None,
             chrome_drag: None,
             workspace_press: None,

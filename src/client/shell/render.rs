@@ -251,6 +251,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) navigating: bool,
     pub(super) sidebar_view: super::preferences::SidebarView,
     pub(super) pending_tree_reveal: &'a mut Option<TreeReveal>,
+    pub(super) selected_hidden_workspace: Option<&'a str>,
     pub(super) spinner_frame: u64,
 }
 
@@ -323,6 +324,7 @@ pub(super) fn render_shell(
         hits.agent_scrollbar = Rect::default();
         hits.agent_sort_toggle = Rect::default();
         hits.sidebar_view_tabs.clear();
+        hits.hidden_workspaces.clear();
         hits.new_workspace = Rect::default();
         hits.machines.clear();
         hits.workspaces.clear();
