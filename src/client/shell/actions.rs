@@ -25,6 +25,7 @@ impl ClientShellState {
                         action,
                         crate::input::KeybindAction::RenameWorkspace
                             | crate::input::KeybindAction::CloseWorkspace
+                            | crate::input::KeybindAction::HideWorkspace
                     )
                 {
                     self.receive_endpoint_unavailable(
@@ -121,6 +122,13 @@ impl ClientShellState {
                     {
                         self.request_pane_close(pane_id, outcome);
                     }
+                    return;
+                }
+                if action == crate::input::KeybindAction::HideWorkspace {
+                    if let Some(workspace_id) = self.workspace_action_id() {
+                        self.request_workspace_hide(workspace_id, outcome);
+                    }
+                    outcome.repaint = true;
                     return;
                 }
                 if action == crate::input::KeybindAction::CloseTab {
@@ -365,6 +373,7 @@ impl ClientShellState {
             | crate::api::schema::Method::PaneFocus(_)
             | crate::api::schema::Method::PaneFocusDirection(_) => true,
             crate::api::schema::Method::WorkspaceCreate(params) => params.focus,
+            crate::api::schema::Method::WorkspaceUnhide(params) => params.focus,
             crate::api::schema::Method::TabCreate(params) => params.focus,
             crate::api::schema::Method::PaneSplit(params) => params.focus,
             _ => false,

@@ -276,6 +276,13 @@ fn restore_with_imports_and_failures(
         }
         matches
     });
+    // a hidden space keeps its id for its way back, so no space restored or opened later may take it
+    crate::workspace::reserve_public_workspace_ids(
+        snapshot
+            .hidden_spaces
+            .iter()
+            .map(|hidden| hidden.id.as_str()),
+    );
     let mut workspaces = Vec::new();
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
@@ -1480,7 +1487,8 @@ mod tests {
                 Arc::new(RenderSignal::new()),
             );
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let captured =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, Vec::new());
             assert_eq!(
                 captured.workspaces.len(),
                 2,
@@ -1523,6 +1531,48 @@ mod tests {
             state.active = Some(0);
             state.assert_invariants_for_test();
         }
+    }
+
+    // a new space must not take the id a hidden one will be looked up by
+    #[test]
+    fn restore_reserves_the_ids_of_hidden_spaces() {
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: Vec::new(),
+            active: None,
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            hidden_spaces: vec![super::super::snapshot::HiddenSpaceSnapshot {
+                id: "wZ".into(),
+                label: Some("away".into()),
+                cwd: "/repo/away".into(),
+            }],
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        assert!(workspaces.is_empty());
+        let generated = crate::workspace::generate_workspace_id();
+        assert!(
+            crate::workspace::public_workspace_number(&generated)
+                > crate::workspace::public_workspace_number("wZ"),
+            "{generated} must come after the hidden wZ"
+        );
     }
 
     #[tokio::test]
@@ -1571,6 +1621,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1672,6 +1723,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1783,6 +1835,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1896,6 +1949,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1998,7 +2052,8 @@ mod tests {
             );
             assert_eq!(terminal.state, state_before_handoff);
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let snapshot = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, Vec::new());
             let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
             let runtime = runtimes.values().next().unwrap();
             runtime
@@ -2237,6 +2292,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Vec::new(),
         };
         history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
         (snapshot, history)

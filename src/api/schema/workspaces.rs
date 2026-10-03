@@ -64,6 +64,14 @@ pub struct WorkspaceMoveBlockParams {
     pub before_workspace_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceUnhideParams {
+    /// id the workspace carried before it was hidden
+    pub workspace_id: String,
+    #[serde(default)]
+    pub focus: bool,
+}
+
 cli_params! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
     pub struct WorkspaceReportMetadataParams => WorkspaceMetadataProjection {

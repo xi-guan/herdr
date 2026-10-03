@@ -236,6 +236,8 @@ impl HeadlessServer {
                 | Method::TabCreate(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
+                | Method::WorkspaceHide(_)
+                | Method::WorkspaceUnhide(_)
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeOpen(_)
                 | Method::WorktreeRemove(_)
@@ -274,9 +276,11 @@ impl HeadlessServer {
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
+                | Method::WorkspaceHide(_)
                 | Method::WorkspaceMove(_)
                 | Method::WorkspaceMoveBlock(_)
                 | Method::WorkspaceRename(_)
+                | Method::WorkspaceUnhide(_)
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeOpen(_)
                 | Method::WorktreeRemove(_)
@@ -305,6 +309,8 @@ impl HeadlessServer {
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
+                | Method::WorkspaceHide(_)
+                | Method::WorkspaceUnhide(_)
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeOpen(_)
                 | Method::WorktreeRemove(_)
@@ -851,6 +857,7 @@ impl HeadlessServer {
         };
         let create_focus_requested = match &msg.request.method {
             api::schema::Method::WorkspaceCreate(params) => params.focus,
+            api::schema::Method::WorkspaceUnhide(params) => params.focus,
             api::schema::Method::TabCreate(params) => params.focus,
             _ => false,
         };
