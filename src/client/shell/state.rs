@@ -514,6 +514,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
     Rename,
+    Hide,
     Close,
     NewWorktree,
     OpenWorktree,

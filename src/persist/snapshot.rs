@@ -26,6 +26,18 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// spaces put away rather than closed, newest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_spaces: Vec<HiddenSpaceSnapshot>,
+}
+
+/// a space the user put away: enough to open it again, nothing else
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HiddenSpaceSnapshot {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub cwd: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,6 +211,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    hidden_spaces: Vec<HiddenSpaceSnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -214,6 +228,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        hidden_spaces: raw.hidden_spaces,
     })
 }
 
@@ -273,6 +288,7 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
+    hidden_spaces: Vec<HiddenSpaceSnapshot>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -285,6 +301,7 @@ pub fn capture(
         sidebar_width: None,
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
+        hidden_spaces,
     }
 }
 
@@ -582,6 +599,7 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
+            state.hidden_spaces_snapshot(),
         )
     }
 
@@ -669,6 +687,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hidden_spaces: Vec::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -760,6 +779,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hidden_spaces: Vec::new(),
             version: SNAPSHOT_VERSION,
         };
 
@@ -932,6 +952,44 @@ mod tests {
         assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("one"));
         assert_eq!(snapshot.active, Some(0));
         assert_eq!(snapshot.selected, 0);
+    }
+
+    // a hidden space is only worth hiding if it survives a restart
+    #[test]
+    fn a_cold_load_brings_hidden_spaces_back_hidden() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.hidden_spaces = vec![
+            crate::app::state::HiddenSpace::new("w7".into(), None, PathBuf::from("/repo/auto")),
+            crate::app::state::HiddenSpace::new(
+                "w3".into(),
+                Some("away".into()),
+                PathBuf::from("/repo/away"),
+            ),
+        ];
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let loaded = parse_snapshot(&json).unwrap();
+
+        assert_eq!(loaded.workspaces.len(), 1);
+        assert_eq!(
+            crate::app::state::AppState::hidden_spaces_from_snapshot(&loaded.hidden_spaces),
+            state.hidden_spaces
+        );
+    }
+
+    #[test]
+    fn a_session_saved_before_hiding_existed_loads_with_nothing_hidden() {
+        let snapshot = parse_snapshot(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+
+        assert!(snapshot.hidden_spaces.is_empty());
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(
+            !json.contains("hidden_spaces"),
+            "an empty list stays out of the file"
+        );
     }
 
     #[test]
@@ -1486,6 +1544,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hidden_spaces: Vec::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

@@ -173,6 +173,8 @@ mod tests {
             "workspace.move_block",
             "workspace.report_metadata",
             "workspace.close",
+            "workspace.hide",
+            "workspace.unhide",
             "worktree.create",
             "worktree.open",
             "worktree.remove",

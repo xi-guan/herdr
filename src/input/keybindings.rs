@@ -24,6 +24,7 @@ pub(crate) enum KeybindAction {
     RemoveWorktree,
     RenameWorkspace,
     CloseWorkspace,
+    HideWorkspace,
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
@@ -105,6 +106,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.remove_worktree, KeybindAction::RemoveWorktree),
         (&keybinds.rename_workspace, KeybindAction::RenameWorkspace),
         (&keybinds.close_workspace, KeybindAction::CloseWorkspace),
+        (&keybinds.hide_workspace, KeybindAction::HideWorkspace),
         (
             &keybinds.previous_workspace,
             KeybindAction::PreviousWorkspace,

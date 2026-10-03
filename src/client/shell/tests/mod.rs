@@ -64,6 +64,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         agents: Vec::new(),
         commands: Vec::new(),
         claude_usage: None,
+        hidden_workspaces: Vec::new(),
     }
 }
 
@@ -255,6 +256,7 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod graphics;
+mod hidden_workspaces;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
