@@ -34,6 +34,10 @@ pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
 
+/// the only shutdown reason that promises a server will be back on the same socket.
+pub const HANDOFF_SHUTDOWN_REASON: &str =
+    "live update in progress; reconnect after handoff completes";
+
 // ---------------------------------------------------------------------------
 // Client → Server messages
 // ---------------------------------------------------------------------------

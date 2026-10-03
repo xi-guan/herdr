@@ -243,6 +243,10 @@ pub(super) fn do_handshake(
     )?;
 
     if endpoint_shell {
+        // a server mid-handoff answers with its shutdown reason, which is worth retrying
+        if let ServerMessage::ServerShutdown { reason } = welcome {
+            return Err(ClientError::ServerShutdown { reason });
+        }
         let ServerMessage::EndpointControl { kind, data } = welcome else {
             return Err(ClientError::Protocol(protocol::FramingError::Io(
                 io::Error::new(
@@ -327,5 +331,50 @@ mod tests {
         assert!(!direct_graphics_capability(true, true, (0, 16), supported));
         assert!(!direct_graphics_capability(true, true, (8, 0), supported));
         assert!(!direct_graphics_capability(true, true, (8, 16), false));
+    }
+
+    /// read as a protocol mismatch, this refusal would park Local as needing attention.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_mid_handoff_refuses_with_its_shutdown_reason() {
+        use interprocess::local_socket::traits::Listener as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "herdr-handoff-handshake-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let mut client = crate::ipc::connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        let _ = std::fs::remove_file(&path);
+        protocol::write_message(
+            &mut server,
+            &ServerMessage::ServerShutdown {
+                reason: Some(protocol::HANDOFF_SHUTDOWN_REASON.to_owned()),
+            },
+        )
+        .unwrap();
+
+        let err = do_handshake(
+            &mut client,
+            80,
+            24,
+            0,
+            0,
+            false,
+            Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+            false,
+            false,
+            false,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ClientError::ServerShutdown { reason }
+                if reason.as_deref() == Some(protocol::HANDOFF_SHUTDOWN_REASON)
+        ));
     }
 }

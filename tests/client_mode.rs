@@ -1390,6 +1390,83 @@ fn client_shell_detaches_restores_and_freshly_reattaches_to_current_state() {
     cleanup_spawned_herdr(client_b, base);
 }
 
+#[test]
+fn client_shell_reconnects_to_the_server_that_took_over_a_live_handoff() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "handoff-reconnect-workspace",
+            "method": "workspace.create",
+            "params": {"cwd": base, "focus": true, "label": "handoff-survivor"},
+        })
+        .to_string(),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    send_pane_shell_command(&api_socket, &pane_id, "printf 'BEFORE_%s\\n' HANDOFF");
+
+    let mut client = spawn_client_shell_process(&config_home, &runtime_dir, &api_socket);
+    let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
+    let screen_text = || {
+        let bytes = output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .bytes
+            .clone();
+        terminal_screen::text(&bytes, 80, 24)
+    };
+    assert!(
+        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+            screen_text().contains("BEFORE_HANDOFF")
+        }),
+        "client must attach before the handoff: {}",
+        screen_text()
+    );
+
+    let handoff = send_json_request(
+        &api_socket,
+        &serde_json::json!({"id": "handoff", "method": "server.live_handoff", "params": {}})
+            .to_string(),
+    );
+    assert!(handoff.get("result").is_some(), "{handoff}");
+
+    let mut input = client._master.as_ref().unwrap().take_writer().unwrap();
+    assert!(
+        wait_until(Duration::from_secs(15), Duration::from_millis(200), || {
+            if screen_text().contains("AFTER_HANDOFF") {
+                return true;
+            }
+            let _ = input.write_all(b"printf 'AFTER_%s\\n' HANDOFF\r");
+            false
+        }),
+        "client must reconnect and keep forwarding input after the handoff: {}",
+        read_output(&output)
+    );
+    assert!(client.child.try_wait().unwrap().is_none());
+
+    drop(input);
+    drop(client);
+    // the replacement server is not our child, so dropping `server` would leave it running
+    let _ = send_json_request(
+        &api_socket,
+        r#"{"id":"stop","method":"server.stop","params":{}}"#,
+    );
+    drop(server);
+    cleanup_test_base(&base);
+}
+
 fn captured_window_titles(output: &SharedOutput) -> Vec<String> {
     read_output(output)
         .split("\x1b]0;")
