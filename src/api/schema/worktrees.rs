@@ -28,6 +28,9 @@ pub struct WorktreeCreateParams {
     pub focus: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub trust_repository: bool,
+    /// Open a newly created worktree space as two side-by-side panes instead of one.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub second_column: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
@@ -46,6 +49,9 @@ pub struct WorktreeOpenParams {
     pub focus: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub trust_repository: bool,
+    /// Open a newly created worktree space as two side-by-side panes instead of one.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub second_column: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

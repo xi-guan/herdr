@@ -188,6 +188,7 @@ impl App {
             repo_name: source.repo_name,
             label: params.label,
             focus: params.focus,
+            second_column: params.second_column,
             respond_to,
         };
         let path = checkout_path;
@@ -422,7 +423,12 @@ impl App {
                 }
                 (ws_idx, false)
             } else {
-                match self.create_workspace_with_options(result.path.clone(), api.focus) {
+                match self.create_workspace_with_launch_env(
+                    result.path.clone(),
+                    api.focus,
+                    Vec::new(),
+                    api.second_column,
+                ) {
                     Ok(ws_idx) => (ws_idx, true),
                     Err(err) => {
                         Self::send_api_response(

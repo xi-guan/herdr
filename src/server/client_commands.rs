@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn advertised_client_shell_method_shapes_stay_at_the_v1_contract() {
-        let expected: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+        let mut expected: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/endpoint-method-shapes-v1.json"
         )))
@@ -297,6 +297,24 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // fork: optional `second_column`; a server without it ignores the field and opens one pane
+        for (method, digest) in [
+            (
+                "workspace.create",
+                "708d66ba03d5764ec0b1186ca6effa68b32aeb5852a13e4ee2638e163e8bcf6e",
+            ),
+            (
+                "worktree.create",
+                "9780b20d689ef7b95e0b1da63f6216ec0720c4d021a15134cb233878420b03cb",
+            ),
+            (
+                "worktree.open",
+                "d1097c712fbd4817fc8f23cb7729d06982a3ce2c9dc8d303c530d9f19a2cd9fc",
+            ),
+        ] {
+            assert_eq!(actual.remove(method).as_deref(), Some(digest), "{method}");
+            expected.remove(method);
+        }
 
         assert_eq!(
             actual, expected,

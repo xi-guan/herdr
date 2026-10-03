@@ -4404,6 +4404,10 @@
                 "null"
               ]
             },
+            "second_column": {
+              "description": "Open the space as two side-by-side panes instead of one. Off by default: a\ncaller states what it wants and can split afterwards if it means to.",
+              "type": "boolean"
+            },
             "source_workspace_id": {
               "description": "Workspace whose focused pane supplies the `follow` cwd policy.",
               "type": [
@@ -4586,6 +4590,10 @@
                 "null"
               ]
             },
+            "second_column": {
+              "description": "Open a newly created worktree space as two side-by-side panes instead of one.",
+              "type": "boolean"
+            },
             "trust_repository": {
               "type": "boolean"
             },
@@ -4647,6 +4655,10 @@
                 "string",
                 "null"
               ]
+            },
+            "second_column": {
+              "description": "Open a newly created worktree space as two side-by-side panes instead of one.",
+              "type": "boolean"
             },
             "trust_repository": {
               "type": "boolean"

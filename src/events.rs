@@ -22,6 +22,7 @@ pub struct ApiWorktreeAddRequest {
     pub repo_name: String,
     pub label: Option<String>,
     pub focus: bool,
+    pub second_column: bool,
     pub respond_to: std::sync::mpsc::Sender<String>,
 }
 

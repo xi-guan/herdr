@@ -168,6 +168,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
         label,
         focus,
         trust_repository,
+        second_column: false,
     })
 }
 
@@ -263,6 +264,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
         label,
         focus,
         trust_repository,
+        second_column: false,
     })
 }
 

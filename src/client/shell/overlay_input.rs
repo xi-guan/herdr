@@ -941,6 +941,7 @@ impl ClientShellState {
                     label: (!trimmed.is_empty() && trimmed != suggested_name)
                         .then(|| trimmed.to_owned()),
                     env: Default::default(),
+                    second_column: true,
                 },
             )),
             ClientRenameTarget::Workspace { workspace_id } => (!trimmed.is_empty()).then(|| {

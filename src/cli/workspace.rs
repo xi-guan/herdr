@@ -99,6 +99,7 @@ fn workspace_create(args: &[String]) -> std::io::Result<i32> {
         focus,
         label,
         env,
+        second_column: false,
     })
 }
 
