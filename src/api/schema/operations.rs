@@ -8,7 +8,11 @@ pub(crate) struct Operation {
 }
 
 macro_rules! define_operations {
-    ($( $variant:ident($params:ty) => $name:literal, $changes_ui:literal, $client_shell:literal; )*) => {
+    (
+        $( $variant:ident($params:ty) => $name:literal, $changes_ui:literal, $client_shell:literal; )*
+        // fork: in-process methods stay out of serde, the schema and OPERATIONS
+        $( @internal $internal:ident($internal_params:ty) => $internal_name:literal; )*
+    ) => {
         #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
         #[serde(tag = "method", content = "params")]
         // Request enums are short-lived wire values; keeping variants direct preserves
@@ -16,6 +20,7 @@ macro_rules! define_operations {
         #[allow(clippy::large_enum_variant)]
         pub enum Method {
             $(#[serde(rename = $name)] $variant($params),)*
+            $(#[serde(skip)] #[schemars(skip)] $internal($internal_params),)*
         }
 
         impl Method {
@@ -33,6 +38,11 @@ macro_rules! define_operations {
                         name: $name,
                         changes_ui: $changes_ui,
                         client_shell: $client_shell,
+                    },)*
+                    $(Self::$internal(_) => operations::Operation {
+                        name: $internal_name,
+                        changes_ui: false,
+                        client_shell: false,
                     },)*
                 }
             }

@@ -256,6 +256,67 @@ fn reply_to_probe(request: ApiRequestMessage) {
     reply(request, result);
 }
 
+fn agent_status_event(title: &str) -> EventEnvelope {
+    EventEnvelope {
+        event: EventKind::PaneAgentStatusChanged,
+        data: EventData::PaneAgentStatusChanged {
+            pane_id: "pane_1".into(),
+            workspace_id: "workspace_1".into(),
+            agent_status: AgentStatus::Working,
+            agent: Some("pi".into()),
+            title: Some(title.into()),
+            display_agent: None,
+            state_labels: Default::default(),
+        },
+    }
+}
+
+fn reply_with_revision(request: ApiRequestMessage, revision: u64) {
+    assert!(matches!(
+        request.request.method,
+        Method::PaneContentRevisions(_)
+    ));
+    let panes = json!([{"pane_id": "pane_1", "workspace_id": "workspace_1", "revision": revision}]);
+    request
+        .respond_to
+        .send(json!({"id": request.request.id, "result": {"panes": panes}}).to_string())
+        .unwrap();
+}
+
+#[test]
+fn all_pane_subscriptions_start_live_without_replaying_history() {
+    let mut test = SocketTest::new();
+    // more than the hub retains, so a replay from sequence 0 would end in events_lost
+    for index in 0..600 {
+        test.hub.push(agent_status_event(&format!("old-{index}")));
+    }
+    let mut client = test.connect();
+    client.subscribe(
+        "all",
+        json!([{"type": "pane.agent_status_changed"}, {"type": "pane.output_changed"}]),
+    );
+    let probe = test.app_request();
+    assert_eq!(probe.request.id, "all:sub:1:probe");
+    reply_with_revision(probe, 4);
+    client.assert_started("all");
+
+    // this tick already drained status history, so the live event goes out next tick
+    let poll = test.app_request();
+    assert_eq!(poll.request.id, "all:sub:1:revisions");
+    test.hub.push(agent_status_event("live"));
+    reply_with_revision(poll, 6);
+
+    let output = client.response();
+    assert_eq!(output["event"], "pane.output_changed");
+    assert_eq!(
+        output["data"],
+        json!({"pane_id": "pane_1", "workspace_id": "workspace_1", "revision": 6})
+    );
+    let status = client.response();
+    assert_eq!(status["event"], "pane_agent_status_changed", "{status}");
+    assert_eq!(status["data"]["title"], "live");
+}
+
 #[test]
 fn subscriptions_drain_retained_bursts_without_per_event_poll_delay() {
     let mut test = SocketTest::new();

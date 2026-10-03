@@ -339,6 +339,13 @@ crate::cli::projection::cli_params! {
     }
 }
 
+/// in-process only: output subscriptions poll this instead of building full pane info
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaneContentRevisionsParams {
+    /// omitted = every pane
+    pub pane_id: Option<String>,
+}
+
 crate::cli::projection::cli_params! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
     pub struct PaneCurrentParams => PaneCurrentProjection {
