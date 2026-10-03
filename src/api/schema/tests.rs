@@ -651,7 +651,7 @@ fn subscribe_request_parses_parameterized_subscriptions() {
     assert!(matches!(
         &params.subscriptions[1],
         Subscription::PaneAgentStatusChanged {
-            pane_id,
+            pane_id: Some(pane_id),
             agent_status: Some(AgentStatus::Done),
         } if pane_id == "p_1_1"
     ));
@@ -659,6 +659,23 @@ fn subscribe_request_parses_parameterized_subscriptions() {
         &params.subscriptions[2],
         Subscription::PaneScrollChanged { pane_id } if pane_id == "p_1_1"
     ));
+}
+
+#[test]
+fn output_changed_subscription_event_round_trips() {
+    let event = SubscriptionEventEnvelope {
+        event: SubscriptionEventKind::OutputChanged,
+        data: SubscriptionEventData::OutputChanged(PaneOutputChangedEvent {
+            pane_id: "p_1_1".into(),
+            workspace_id: "w_1".into(),
+            revision: 9,
+        }),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["event"], "pane.output_changed");
+    assert_eq!(value["data"]["revision"], 9);
+    let back: SubscriptionEventEnvelope = serde_json::from_value(value).unwrap();
+    assert_eq!(back, event);
 }
 
 #[test]
