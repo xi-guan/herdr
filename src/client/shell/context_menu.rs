@@ -87,6 +87,9 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::HiddenWorkspace { .. } => {
+                vec![item("Restore", Action::Restore)]
+            }
         }
     }
 }
@@ -223,8 +226,38 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::HiddenWorkspace { workspace_id } => {
+                if action == ClientContextMenuAction::Restore {
+                    self.push_endpoint_method_with_kind(
+                        crate::api::schema::Method::WorkspaceUnhide(
+                            crate::api::schema::WorkspaceUnhideParams {
+                                workspace_id: workspace_id.clone(),
+                                focus: true,
+                            },
+                        ),
+                        PendingEndpointKind::WorkspaceRestore { workspace_id },
+                        outcome,
+                    );
+                }
+            }
         }
         outcome.repaint = true;
+    }
+
+    /// a menu anchored on the click would cover the one-line row it came from, its only mark.
+    pub(super) fn open_hidden_workspace_context_menu(
+        &mut self,
+        workspace_id: String,
+        x: u16,
+        y: u16,
+    ) {
+        self.selected_hidden_workspace = Some(workspace_id.clone());
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::HiddenWorkspace { workspace_id },
+            x,
+            y: y.saturating_add(1),
+            highlighted: 0,
+        }));
     }
 
     fn activate_workspace_context_action(

@@ -21,6 +21,8 @@ pub(crate) enum SidebarView {
     #[default]
     Spaces,
     Agents,
+    /// spaces put away rather than closed, waiting to be opened again
+    Hidden,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
