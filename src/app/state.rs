@@ -813,6 +813,9 @@ pub struct AppState {
     pub update_install_command: String,
     pub latest_release_notes_available: bool,
     pub update_dismissed: bool,
+    pub claude_usage: Option<crate::usage::ClaudeUsage>,
+    // a separate reading from the windows: a file on disk rather than an endpoint that rate-limits
+    pub claude_seven_day_tokens: Option<u64>,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
     pub pending_agent_notifications: std::collections::HashMap<PaneId, PendingAgentNotification>,
@@ -1057,6 +1060,8 @@ impl AppState {
             update_install_command: "herdr update".into(),
             latest_release_notes_available: false,
             update_dismissed: false,
+            claude_usage: None,
+            claude_seven_day_tokens: None,
             config_diagnostic: None,
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),

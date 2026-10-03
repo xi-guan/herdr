@@ -168,6 +168,8 @@ pub enum AppEvent {
         version: String,
         install_command: String,
     },
+    /// a background claude usage or token read finished
+    ClaudeUsage(crate::usage::UsageEvent),
     /// Remote agent detection manifest update check finished.
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,

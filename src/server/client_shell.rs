@@ -238,6 +238,23 @@ pub(super) fn snapshot_with_completions(
                 body: notes.body.clone(),
                 preview: notes.preview,
             });
+    // stored values only: the countdown is the client's, so this does not change between reads
+    let claude_usage = (app.state.claude_usage.is_some()
+        || app.state.claude_seven_day_tokens.is_some())
+    .then(|| protocol::ClientShellClaudeUsage {
+        windows: app
+            .state
+            .claude_usage
+            .iter()
+            .flat_map(|usage| &usage.windows)
+            .map(|window| protocol::ClientShellUsageWindow {
+                label: window.label.clone(),
+                percent: window.percent,
+                resets_at: window.resets_at,
+            })
+            .collect(),
+        seven_day_tokens: app.state.claude_seven_day_tokens,
+    });
 
     let shell = protocol::ClientShellSnapshot {
         boot_id: boot_id.to_owned(),
@@ -263,6 +280,7 @@ pub(super) fn snapshot_with_completions(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
+        claude_usage,
     };
     (shell, completions)
 }
@@ -751,6 +769,51 @@ mod tests {
             )),
             Some(("0.8.3", "### Changed\n- Client shell", true))
         );
+    }
+
+    // a snapshot that moved on its own would be resent to every client on every frame
+    #[test]
+    fn snapshot_projects_stored_claude_usage_and_holds_still() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        assert_eq!(snapshot(&app, "boot", 7, None, None).claude_usage, None);
+
+        app.state.claude_seven_day_tokens = Some(31_000_000);
+        let tokens_only = snapshot(&app, "boot", 7, None, None);
+        assert_eq!(
+            tokens_only.claude_usage,
+            Some(protocol::ClientShellClaudeUsage {
+                windows: Vec::new(),
+                seven_day_tokens: Some(31_000_000),
+            })
+        );
+
+        app.state.claude_usage = Some(crate::usage::ClaudeUsage {
+            windows: vec![crate::usage::UsageWindow {
+                label: "five_hour".into(),
+                percent: 3,
+                resets_at: Some(1_785_588_600),
+            }],
+        });
+        let first = snapshot(&app, "boot", 7, None, None);
+        assert_eq!(
+            first
+                .claude_usage
+                .as_ref()
+                .map(|usage| usage.windows.clone()),
+            Some(vec![protocol::ClientShellUsageWindow {
+                label: "five_hour".into(),
+                percent: 3,
+                resets_at: Some(1_785_588_600),
+            }])
+        );
+        assert_eq!(snapshot(&app, "boot", 7, None, None), first);
     }
 
     #[test]
