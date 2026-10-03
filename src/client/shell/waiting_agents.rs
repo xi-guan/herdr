@@ -39,6 +39,7 @@ impl ClientShellState {
         let Some(pane_id) = self.snapshot.as_deref().and_then(next_pane_waiting_on_you) else {
             return;
         };
+        self.reveal_agent_in_tree(&pane_id);
         self.push_endpoint_method(
             crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id }),
             outcome,

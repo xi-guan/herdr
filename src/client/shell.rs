@@ -31,6 +31,8 @@ mod preferences;
 mod render;
 mod scroll;
 mod settings;
+mod sidebar_tree;
+mod spinner;
 mod state;
 mod surface_patch;
 mod text_editor;
@@ -41,6 +43,7 @@ use text_editor::TextEditor;
 use word_selection::ClientWordSelection;
 
 pub(in crate::client::shell) use render::sidebar;
+pub(super) use spinner::SpinnerRepaint;
 pub(crate) use state::*;
 #[cfg(test)]
 pub(super) use surface_patch::apply_composed_surface_patch;
@@ -195,6 +198,101 @@ fn status_icon(
         (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "✓",
         (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "○",
         (StatusIndicatorStyle::Symbols, AgentStatus::Unknown) => "·",
+    }
+}
+
+/// space rows and the collapsed list: dots say only whether something wants you.
+fn space_status_glyph(
+    status: crate::api::schema::AgentStatus,
+    style: crate::config::StatusIndicatorStyle,
+) -> &'static str {
+    use crate::api::schema::AgentStatus;
+    use crate::config::StatusIndicatorStyle;
+    match (style, status) {
+        // a middle dot vanishes beside digits; a dash reads as "no agent here"
+        (StatusIndicatorStyle::Dots, AgentStatus::Unknown) => "–",
+        _ => status_icon(status, style),
+    }
+}
+
+/// the one-cell agent mark of the agents view and the collapsed list, turning while it works.
+fn agent_status_glyph(
+    status: crate::api::schema::AgentStatus,
+    style: crate::config::StatusIndicatorStyle,
+    frame: u64,
+) -> &'static str {
+    if status_turns(status, style) {
+        spinner::single_cell(frame)
+    } else {
+        space_status_glyph(status, style)
+    }
+}
+
+/// only the dots style animates, and only a working agent; the symbols are static by design.
+fn status_turns(
+    status: crate::api::schema::AgentStatus,
+    style: crate::config::StatusIndicatorStyle,
+) -> bool {
+    style == crate::config::StatusIndicatorStyle::Dots
+        && status == crate::api::schema::AgentStatus::Working
+}
+
+/// one cell of an agent row's bar in the spaces tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarCell {
+    Static(&'static str),
+    Turning(spinner::SpinnerGlyph),
+}
+
+impl BarCell {
+    fn symbol(self, frame: u64) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Static(symbol) => symbol.into(),
+            Self::Turning(glyph) => glyph.symbol(frame).into(),
+        }
+    }
+}
+
+/// the column an agent row's bar owns on each of its first two rows; a lone row turns one cell.
+fn agent_bar_cells(
+    status: crate::api::schema::AgentStatus,
+    style: crate::config::StatusIndicatorStyle,
+    rows: usize,
+) -> [BarCell; 2] {
+    use crate::api::schema::AgentStatus;
+    use crate::config::StatusIndicatorStyle;
+    use spinner::SpinnerGlyph;
+    match (style, status) {
+        (StatusIndicatorStyle::Dots, AgentStatus::Working) if rows > 1 => [
+            BarCell::Turning(SpinnerGlyph::RingTop),
+            BarCell::Turning(SpinnerGlyph::RingBottom),
+        ],
+        (StatusIndicatorStyle::Dots, AgentStatus::Working) => {
+            [BarCell::Turning(SpinnerGlyph::Single); 2]
+        }
+        // idle keeps the line and drops its weight
+        (StatusIndicatorStyle::Dots, AgentStatus::Idle) => [BarCell::Static("│"); 2],
+        // box-drawing verticals join across rows into one unbroken line
+        (StatusIndicatorStyle::Dots, _) => [BarCell::Static("┃"); 2],
+        (StatusIndicatorStyle::Symbols, status) => [
+            BarCell::Static(status_icon(status, StatusIndicatorStyle::Symbols)),
+            BarCell::Static(" "),
+        ],
+    }
+}
+
+/// the colour of a state written out as text, apart from the mark's own table.
+fn status_text_color(
+    status: crate::api::schema::AgentStatus,
+    palette: &Palette,
+) -> ratatui::style::Color {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => palette.red,
+        AgentStatus::Working => palette.yellow,
+        AgentStatus::Done => palette.teal,
+        AgentStatus::Idle => palette.green,
+        AgentStatus::Unknown => palette.overlay0,
     }
 }
 

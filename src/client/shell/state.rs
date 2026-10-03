@@ -146,6 +146,8 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_max_scroll: usize,
     // wall clock, since the countdown it refreshes is measured against a wall-clock reset
     pub(super) claude_usage_repaint_at: Option<std::time::SystemTime>,
+    pub(super) spinner_cells: Vec<spinner::SpinnerCell>,
+    pub(super) sidebar_view_tabs: Vec<(Rect, preferences::SidebarView)>,
 }
 
 #[derive(Clone)]
@@ -885,6 +887,7 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_section_split: f32,
     pub(super) sidebar_section_split_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
+    pub(super) sidebar_view: preferences::SidebarView,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
@@ -894,6 +897,7 @@ pub(crate) struct ClientShellState {
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
+    pub(super) pending_tree_reveal: Option<TreeReveal>,
     pub(super) tab_scroll: usize,
     pub(super) mobile_switcher_scroll: usize,
     pub(super) reveal_focused_workspace: bool,
@@ -968,6 +972,8 @@ pub(crate) struct ClientShellState {
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
+    pub(super) agent_spinner_frame: u64,
+    pub(super) agent_spinner_deadline: Option<std::time::Instant>,
 }
 
 pub(super) fn product_announcement_state(
@@ -992,6 +998,14 @@ pub(super) fn release_notes_state(
         scroll: 0,
         preview: notes.preview,
     }
+}
+
+/// a row the spaces tree scrolls to on its next pass, where row heights and gaps are known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TreeReveal {
+    Space(String),
+    /// waits for a snapshot that shows this pane focused, since the client asked for that
+    Agent(String),
 }
 
 #[derive(Clone, Copy)]
@@ -1028,6 +1042,11 @@ impl ClientShellState {
         if let Some(sort) = preferences.agent_panel_sort {
             config.agent_panel_sort = sort;
         }
+        // the view tabs are mouse-only, so never restore into a view there is no way to leave
+        let sidebar_view = preferences
+            .sidebar_view
+            .filter(|_| config.mouse_capture)
+            .unwrap_or_default();
         let mut remote_collapsed_groups = HashMap::<ClientEndpointId, HashSet<String>>::new();
         for saved in preferences.remote_collapsed_groups {
             let Ok(profile_id) = crate::client::endpoint::ProfileId::parse(saved.profile_id) else {
@@ -1059,6 +1078,7 @@ impl ClientShellState {
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
+            sidebar_view,
             last_sidebar_divider_click: None,
             chrome_drag: None,
             workspace_press: None,
@@ -1068,6 +1088,7 @@ impl ClientShellState {
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
+            pending_tree_reveal: None,
             tab_scroll: 0,
             mobile_switcher_scroll: 0,
             reveal_focused_workspace: true,
@@ -1136,6 +1157,8 @@ impl ClientShellState {
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,
+            agent_spinner_frame: 0,
+            agent_spinner_deadline: None,
         }
     }
 
@@ -1209,6 +1232,11 @@ impl ClientShellState {
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
+        // the single-machine tree scrolls by tree row, which only its own pass can count
+        if self.endpoints.len() == 1 {
+            self.pending_tree_reveal = Some(TreeReveal::Space(workspace_id.to_owned()));
+            return;
+        }
         if self
             .hits
             .workspaces
@@ -1301,6 +1329,7 @@ impl ClientShellState {
         self.tab_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
+        self.pending_tree_reveal = None;
         self.tab_scroll = 0;
         self.mobile_switcher_scroll = 0;
         self.reveal_focused_workspace = true;
@@ -1949,6 +1978,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.spinner_wake_at())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

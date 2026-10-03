@@ -7,8 +7,10 @@ use ratatui::{
 };
 
 pub(crate) use self::tokens::{
-    agent_rows as sidebar_agent_rows, space_rows as sidebar_space_rows, AgentTokenContext,
-    ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
+    agent_rows as sidebar_agent_rows, local_agent_rows as sidebar_local_agent_rows,
+    nested_agent_rows as sidebar_nested_agent_rows, rows_text as sidebar_rows_text,
+    separator_tree as sidebar_separator_tree, space_rows as sidebar_space_rows, AgentTokenContext,
+    NestedContext, ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
 };
 use super::text::{display_width, truncate_end};
 use crate::app::state::Palette;
@@ -113,6 +115,62 @@ pub(crate) fn resolved_token_spans(
     palette: &Palette,
     max_width: usize,
 ) -> Vec<Span<'static>> {
+    styled_token_spans(
+        resolved,
+        state_icon,
+        RowStyles {
+            state_text: state_text_style,
+            workspace: workspace_style,
+            agent: secondary_style,
+            branch: secondary_style,
+            secondary: secondary_style,
+            custom: custom_style,
+            separator: Style::default().fg(palette.overlay0),
+        },
+        palette,
+        max_width,
+        tokens::separator,
+    )
+    .spans
+}
+
+/// per-token styles for one row; a nested agent row has no workspace, so its agent takes the bright tier.
+#[derive(Clone, Copy)]
+pub(crate) struct RowStyles {
+    pub(crate) state_text: Style,
+    pub(crate) workspace: Style,
+    pub(crate) agent: Style,
+    pub(crate) branch: Style,
+    pub(crate) secondary: Style,
+    pub(crate) custom: Style,
+    pub(crate) separator: Style,
+}
+
+pub(crate) struct StyledRow {
+    pub(crate) spans: Vec<Span<'static>>,
+    /// how far into the spans the state icon starts, so a turning one can be found again
+    pub(crate) state_icon_column: Option<u16>,
+}
+
+pub(crate) type TokenSeparator = fn(&ResolvedToken, &ResolvedToken) -> &'static str;
+
+pub(crate) fn styled_token_spans(
+    resolved: &[ResolvedToken],
+    state_icon: (&str, Style),
+    styles: RowStyles,
+    palette: &Palette,
+    max_width: usize,
+    separator: TokenSeparator,
+) -> StyledRow {
+    let RowStyles {
+        state_text: state_text_style,
+        workspace: workspace_style,
+        agent: agent_style,
+        branch: branch_style,
+        secondary: secondary_style,
+        custom: custom_style,
+        separator: separator_style,
+    } = styles;
     let fixed_widths = resolved
         .iter()
         .map(|token| match &token.kind {
@@ -152,7 +210,7 @@ pub(crate) fn resolved_token_spans(
             .sum::<usize>();
         let separators = indices
             .windows(2)
-            .map(|pair| display_width(tokens::separator(&resolved[pair[0]], &resolved[pair[1]])))
+            .map(|pair| display_width(separator(&resolved[pair[0]], &resolved[pair[1]])))
             .sum::<usize>();
         content + separators
     };
@@ -180,7 +238,7 @@ pub(crate) fn resolved_token_spans(
         .collect::<Vec<_>>();
     let separator_width = visible_indices
         .windows(2)
-        .map(|pair| display_width(tokens::separator(&resolved[pair[0]], &resolved[pair[1]])))
+        .map(|pair| display_width(separator(&resolved[pair[0]], &resolved[pair[1]])))
         .sum::<usize>();
     let fixed_width = visible_indices
         .iter()
@@ -213,20 +271,27 @@ pub(crate) fn resolved_token_spans(
     }
 
     let mut spans = Vec::new();
+    let mut state_icon_column = None;
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
         if position > 0 {
             let previous = &resolved[visible_indices[position - 1]];
-            spans.push(Span::styled(
-                tokens::separator(previous, token),
-                Style::default().fg(palette.overlay0),
-            ));
+            spans.push(Span::styled(separator(previous, token), separator_style));
         }
         match &token.kind {
-            ResolvedTokenKind::StateIcon => spans.push(Span::styled(
-                state_icon.0.to_string(),
-                apply_token_style(state_icon.1, token.style),
-            )),
+            ResolvedTokenKind::StateIcon => {
+                state_icon_column.get_or_insert_with(|| {
+                    spans
+                        .iter()
+                        .map(|span| display_width(span.content.as_ref()))
+                        .sum::<usize>()
+                        .min(u16::MAX as usize) as u16
+                });
+                spans.push(Span::styled(
+                    state_icon.0.to_string(),
+                    apply_token_style(state_icon.1, token.style),
+                ));
+            }
             ResolvedTokenKind::StateText(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
                 apply_token_style(state_text_style, token.style),
@@ -235,11 +300,17 @@ pub(crate) fn resolved_token_spans(
                 truncate_end(text, budgets[index]),
                 apply_token_style(workspace_style, token.style),
             )),
+            ResolvedTokenKind::Agent(text) => spans.push(Span::styled(
+                truncate_end(text, budgets[index]),
+                apply_token_style(agent_style, token.style),
+            )),
+            ResolvedTokenKind::Branch(text) => spans.push(Span::styled(
+                truncate_end(text, budgets[index]),
+                apply_token_style(branch_style, token.style),
+            )),
             ResolvedTokenKind::Machine(text)
             | ResolvedTokenKind::Tab(text)
-            | ResolvedTokenKind::Pane(text)
-            | ResolvedTokenKind::Agent(text)
-            | ResolvedTokenKind::Branch(text) => spans.push(Span::styled(
+            | ResolvedTokenKind::Pane(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
                 apply_token_style(secondary_style, token.style),
             )),
@@ -271,7 +342,10 @@ pub(crate) fn resolved_token_spans(
             }
         }
     }
-    spans
+    StyledRow {
+        spans,
+        state_icon_column,
+    }
 }
 
 fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {

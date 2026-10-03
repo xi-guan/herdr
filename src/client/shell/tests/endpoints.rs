@@ -539,8 +539,11 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
             if !saved_machine {
                 state.set_endpoint_catalog(&[]);
             }
+            // fork: the single-machine agents view spans the whole sidebar, so it overflows only on a shorter screen
+            state.sidebar_view = preferences::SidebarView::Agents;
+            let rows = if saved_machine { 28 } else { 12 };
             state.agent_scroll = if scroll_to_bottom { usize::MAX } else { 0 };
-            let frame = state.compose(100, 28).expect("overflowing agent panel");
+            let frame = state.compose(100, rows).expect("overflowing agent panel");
             assert!(!state.hits.agent_scrollbar.is_empty());
             let scroll = state.agent_scroll;
 
@@ -562,7 +565,7 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
             assert_eq!(state.agent_scroll, scroll);
             assert!(state.chrome_drag.is_none());
 
-            state.compose(100, 28).expect("collapsed sidebar");
+            state.compose(100, rows).expect("collapsed sidebar");
             let toggle = state.hits.sidebar_toggle;
             let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
