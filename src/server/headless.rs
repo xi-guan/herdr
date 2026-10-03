@@ -3322,6 +3322,7 @@ impl HeadlessServer {
 
         if self.git_refresh_scheduled() {
             self.app.start_git_status_refresh_if_due(now);
+            self.app.run_claude_usage_polls_if_due(now);
         }
 
         if self
