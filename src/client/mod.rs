@@ -402,6 +402,9 @@ fn run_client_with_mode(
     Ok(())
 }
 
+/// how long a lost Local is waited on: enough for a live handoff, short enough for a dead server.
+const RECONNECT_WINDOW: Duration = Duration::from_secs(5);
+
 // This guards server-supplied paths only. Client-owned temporary files generated
 // from received graphics bytes remain usable for remote endpoints.
 fn server_graphics_files_allowed(
@@ -494,6 +497,8 @@ async fn run_client_loop(
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
     let mut federated = endpoint_catalog.has_enabled_ssh();
+    // a lost Local that may come back, with the deadline and error that end the wait
+    let mut local_recovery: Option<(std::time::Instant, ClientError)> = None;
     if let Some(shell) = state.shell.as_mut() {
         shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
@@ -1383,6 +1388,9 @@ async fn run_client_loop(
                     ) {
                         continue;
                     }
+                    if endpoint_id.is_local() {
+                        local_recovery = None;
+                    }
                     let surface_decoder = negotiated_surface_decoder(&negotiation);
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
@@ -1802,7 +1810,16 @@ async fn run_client_loop(
                     }
                     ServerMessage::ServerShutdown { reason } => {
                         if !federated && endpoint_id.is_local() {
-                            return Err(ClientError::ServerShutdown { reason });
+                            let shutdown = ClientError::ServerShutdown {
+                                reason: reason.clone(),
+                            };
+                            // of all shutdowns only a handoff promises a server back on the socket
+                            if state.shell.is_none()
+                                || reason.as_deref()
+                                    != Some(crate::protocol::HANDOFF_SHUTDOWN_REASON)
+                            {
+                                return Err(shutdown);
+                            }
                         }
                         write_stream.fail(
                             &endpoint_id,
@@ -2275,11 +2292,17 @@ async fn run_client_loop(
                         error = %failure.message,
                         "endpoint transport failed"
                     );
-                    if !federated && failure.endpoint_id.is_local() {
-                        return Err(ClientError::ConnectionLost(io::Error::new(
+                    if !federated && failure.endpoint_id.is_local() && local_recovery.is_none() {
+                        let lost = ClientError::ConnectionLost(io::Error::new(
                             failure.kind,
-                            failure.message,
-                        )));
+                            failure.message.clone(),
+                        ));
+                        if state.shell.is_none() {
+                            return Err(lost);
+                        }
+                        // a handoff's replacement takes this socket; wait only as long as one takes
+                        supervisors.add_local(client_socket_path(), Some(failure.generation), now);
+                        local_recovery = Some((now + RECONNECT_WINDOW, lost));
                     }
                     if handle_endpoint_disconnect(
                         &mut state,
@@ -2297,6 +2320,12 @@ async fn run_client_loop(
                             &host_mouse_capture_active,
                             &host_sgr_pixels_active,
                         );
+                    }
+                }
+                if let Some((_, error)) = local_recovery.take_if(|(deadline, _)| now >= *deadline) {
+                    // saved machines enabled meanwhile hand Local to the supervisor for good
+                    if !federated {
+                        return Err(error);
                     }
                 }
                 // A revoked transport changes the safe rollback destination. Handle those
