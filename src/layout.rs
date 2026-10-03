@@ -60,32 +60,6 @@ pub struct SplitBorder {
     pub path: Vec<bool>,
 }
 
-/// The area panes tile into. `Gutter` holds the root split's two sides apart so
-/// something else — the sidebar — can occupy the seam between them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneArea {
-    Whole(Rect),
-    Gutter { left: Rect, right: Rect },
-}
-
-impl PaneArea {
-    /// The rect covering both sides and the gutter, for callers that need one
-    /// box: zoom, empty states, overlays.
-    pub fn bounds(self) -> Rect {
-        match self {
-            Self::Whole(area) => area,
-            Self::Gutter { left, right } => Rect {
-                width: (right.x + right.width).saturating_sub(left.x),
-                ..left
-            },
-        }
-    }
-}
-
-/// Narrower than this and a side of the gutter holds a border pair and little
-/// else, so the centered sidebar gives up and goes back to the edge.
-const MIN_GUTTER_SIDE: u16 = 20;
-
 /// Cardinal direction for pane navigation.
 #[derive(Debug, Clone, Copy)]
 pub enum NavDirection {
@@ -155,79 +129,33 @@ impl TileLayout {
         result
     }
 
+    /// Compute pane rects as they will be after splitting `target`, without
+    /// changing the layout. Returns the rects and the new pane's index; the
+    /// new pane's entry carries `target`'s id.
+    pub fn panes_after_split(
+        &self,
+        area: Rect,
+        target: PaneId,
+        direction: Direction,
+        ratio: f32,
+    ) -> Option<(Vec<PaneInfo>, usize)> {
+        let mut panes = self.panes(area);
+        let index = panes.iter().position(|info| info.id == target)?;
+        let (first, second) = split_rect(panes[index].rect, direction, valid_split_ratio(ratio));
+        panes[index].rect = first;
+        panes[index].inner_rect = first;
+        let mut new_pane = panes[index].clone();
+        new_pane.rect = second;
+        new_pane.inner_rect = second;
+        new_pane.is_focused = false;
+        panes.insert(index + 1, new_pane);
+        Some((panes, index + 1))
+    }
+
     /// Collect all split boundaries for mouse drag resize.
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
         let mut result = Vec::new();
-        collect_splits(&self.root, area, vec![], &mut result);
-        result
-    }
-
-    /// Carve `area` into (left, gutter, right) with the gutter sitting on the root
-    /// split's seam. `None` when there is no seam to sit on — a single pane or a
-    /// stacked root — or when the reservation would starve one of the sides.
-    pub fn gutter_areas(&self, area: Rect, gutter: u16) -> Option<(Rect, Rect, Rect)> {
-        let Node::Split {
-            direction: Direction::Horizontal,
-            ratio,
-            ..
-        } = &self.root
-        else {
-            return None;
-        };
-        let tiled = area.width.checked_sub(gutter)?;
-        // the seam lands where the root ratio already puts it, so dragging or
-        // resizing the split still means something and saved ratios survive
-        let (left, right) = split_rect(
-            Rect {
-                width: tiled,
-                ..area
-            },
-            Direction::Horizontal,
-            *ratio,
-        );
-        if left.width < MIN_GUTTER_SIDE || right.width < MIN_GUTTER_SIDE {
-            return None;
-        }
-        let gutter_rect = Rect {
-            x: left.x + left.width,
-            width: gutter,
-            ..area
-        };
-        let right = Rect {
-            x: gutter_rect.x + gutter,
-            ..right
-        };
-        Some((left, gutter_rect, right))
-    }
-
-    /// Compute rects for all panes, honouring a reserved gutter when there is one.
-    pub fn panes_in(&self, area: PaneArea) -> Vec<PaneInfo> {
-        let PaneArea::Gutter { left, right } = area else {
-            return self.panes(area.bounds());
-        };
-        let Node::Split { first, second, .. } = &self.root else {
-            return self.panes(area.bounds());
-        };
-        let mut result = Vec::new();
-        collect_panes(first, left, self.focus, &mut result);
-        collect_panes(second, right, self.focus, &mut result);
-        result
-    }
-
-    /// Split boundaries for mouse drag resize, honouring a reserved gutter.
-    ///
-    /// The root boundary is left out under a gutter: whatever fills the gutter owns
-    /// those columns, so a drag there belongs to it and not to the split.
-    pub fn splits_in(&self, area: PaneArea) -> Vec<SplitBorder> {
-        let PaneArea::Gutter { left, right } = area else {
-            return self.splits(area.bounds());
-        };
-        let Node::Split { first, second, .. } = &self.root else {
-            return self.splits(area.bounds());
-        };
-        let mut result = Vec::new();
-        collect_splits(first, left, vec![false], &mut result);
-        collect_splits(second, right, vec![true], &mut result);
+        collect_splits(&self.root, area, &mut Vec::new(), &mut result);
         result
     }
 
@@ -257,13 +185,9 @@ impl TileLayout {
         direction: Direction,
         ratio: f32,
     ) -> Option<PaneId> {
-        if !self.pane_ids().contains(&target) {
-            return None;
-        }
+        let node = find_pane_mut(&mut self.root, target)?;
         let new_id = PaneId::alloc();
-        let placeholder = PaneId::from_raw(0);
-        let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, target, direction, new_id, valid_split_ratio(ratio));
+        *node = split_node(target, direction, new_id, valid_split_ratio(ratio));
         Some(new_id)
     }
 
@@ -282,13 +206,13 @@ impl TileLayout {
             return false;
         }
         let ids = self.pane_ids();
-        if !ids.contains(&target) || ids.contains(&moved) {
+        if ids.contains(&moved) {
             return false;
         }
-
-        let placeholder = PaneId::from_raw(0);
-        let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, target, direction, moved, valid_split_ratio(ratio));
+        let Some(node) = find_pane_mut(&mut self.root, target) else {
+            return false;
+        };
+        *node = split_node(target, direction, moved, valid_split_ratio(ratio));
         if focus {
             self.set_focus(moved);
         }
@@ -601,7 +525,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
     }
 }
 
-fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<SplitBorder>) {
+fn collect_splits(node: &Node, area: Rect, path: &mut Vec<bool>, result: &mut Vec<SplitBorder>) {
     if let Node::Split {
         direction,
         ratio,
@@ -621,12 +545,12 @@ fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<Spl
             area,
             path: path.clone(),
         });
-        let mut lp = path.clone();
-        lp.push(false);
-        collect_splits(first, a, lp, result);
-        let mut rp = path;
-        rp.push(true);
-        collect_splits(second, b, rp, result);
+        path.push(false);
+        collect_splits(first, a, path, result);
+        path.pop();
+        path.push(true);
+        collect_splits(second, b, path, result);
+        path.pop();
     }
 }
 
@@ -682,36 +606,26 @@ fn swap_pane_ids(node: &mut Node, first: PaneId, second: PaneId) {
     }
 }
 
-fn split_at(
-    node: Node,
-    target: PaneId,
-    direction: Direction,
-    new_id: PaneId,
-    split_ratio: f32,
-) -> Node {
+fn find_pane_mut(node: &mut Node, target: PaneId) -> Option<&mut Node> {
     match node {
-        Node::Pane(id) if id == target => Node::Split {
-            direction,
-            ratio: split_ratio,
-            first: Box::new(Node::Pane(id)),
-            second: Box::new(Node::Pane(new_id)),
-        },
-        Node::Pane(_) => node,
-        Node::Split {
-            direction: d,
-            ratio,
-            first,
-            second,
-        } => Node::Split {
-            direction: d,
-            ratio,
-            first: Box::new(split_at(*first, target, direction, new_id, split_ratio)),
-            second: Box::new(split_at(*second, target, direction, new_id, split_ratio)),
-        },
+        Node::Pane(id) if *id == target => Some(node),
+        Node::Pane(_) => None,
+        Node::Split { first, second, .. } => {
+            find_pane_mut(first, target).or_else(|| find_pane_mut(second, target))
+        }
     }
 }
 
-fn valid_split_ratio(ratio: f32) -> f32 {
+fn split_node(target: PaneId, direction: Direction, new_id: PaneId, split_ratio: f32) -> Node {
+    Node::Split {
+        direction,
+        ratio: split_ratio,
+        first: Box::new(Node::Pane(target)),
+        second: Box::new(Node::Pane(new_id)),
+    }
+}
+
+pub(crate) fn valid_split_ratio(ratio: f32) -> f32 {
     if ratio.is_finite() {
         ratio.clamp(0.1, 0.9)
     } else {
@@ -808,132 +722,180 @@ fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
 mod tests {
     use super::*;
 
-    fn pane(id: u32) -> PaneId {
-        PaneId::from_raw(id)
-    }
-
-    fn two_column_layout(ratio: f32) -> TileLayout {
-        TileLayout::from_saved(
+    #[test]
+    fn split_paths_preserve_preorder_geometry_and_resize_targets() {
+        let ids = [
+            PaneId::alloc(),
+            PaneId::alloc(),
+            PaneId::alloc(),
+            PaneId::alloc(),
+        ];
+        let mut layout = TileLayout::from_saved(
             Node::Split {
                 direction: Direction::Horizontal,
-                ratio,
-                first: Box::new(Node::Pane(pane(1))),
-                second: Box::new(Node::Pane(pane(2))),
-            },
-            pane(1),
-        )
-    }
-
-    #[test]
-    fn gutter_sits_on_the_seam_the_root_ratio_already_chose() {
-        let layout = two_column_layout(0.5);
-        let area = Rect::new(0, 0, 106, 20);
-
-        let (left, gutter, right) = layout.gutter_areas(area, 26).unwrap();
-
-        assert_eq!(left, Rect::new(0, 0, 40, 20));
-        assert_eq!(gutter, Rect::new(40, 0, 26, 20));
-        assert_eq!(right, Rect::new(66, 0, 40, 20));
-        // no column is spent twice and none is lost
-        assert_eq!(left.width + gutter.width + right.width, area.width);
-    }
-
-    #[test]
-    fn gutter_moves_with_the_root_ratio() {
-        let area = Rect::new(0, 0, 106, 20);
-
-        let (_, narrow, _) = two_column_layout(0.35).gutter_areas(area, 26).unwrap();
-        let (_, wide, _) = two_column_layout(0.65).gutter_areas(area, 26).unwrap();
-
-        assert_eq!(narrow.x, 28);
-        assert_eq!(wide.x, 52);
-    }
-
-    #[test]
-    fn no_gutter_without_a_left_right_seam_to_sit_on() {
-        let area = Rect::new(0, 0, 106, 20);
-        let (single, _) = TileLayout::new();
-        assert_eq!(single.gutter_areas(area, 26), None);
-
-        let stacked = TileLayout::from_saved(
-            Node::Split {
-                direction: Direction::Vertical,
                 ratio: 0.5,
-                first: Box::new(Node::Pane(pane(1))),
-                second: Box::new(Node::Pane(pane(2))),
+                first: Box::new(split_node(ids[0], Direction::Vertical, ids[1], 0.5)),
+                second: Box::new(split_node(ids[2], Direction::Vertical, ids[3], 0.25)),
             },
-            pane(1),
+            ids[0],
         );
-        assert_eq!(stacked.gutter_areas(area, 26), None);
-    }
-
-    #[test]
-    fn no_gutter_when_it_would_starve_a_side() {
-        let layout = two_column_layout(0.5);
-        // 60 wide leaves 17 a side once 26 columns are taken out
-        assert_eq!(layout.gutter_areas(Rect::new(0, 0, 60, 20), 26), None);
-        assert_eq!(layout.gutter_areas(Rect::new(0, 0, 20, 20), 26), None);
-        // lopsided enough and the thin side starves even on a wide screen
-        assert_eq!(
-            two_column_layout(0.9).gutter_areas(Rect::new(0, 0, 106, 20), 26),
-            None
-        );
-    }
-
-    #[test]
-    fn panes_tile_either_side_of_the_gutter_without_entering_it() {
-        let layout = sample_layout();
-        let area = Rect::new(0, 0, 200, 20);
-        let (left, gutter, right) = layout.gutter_areas(area, 26).unwrap();
-
-        let panes = layout.panes_in(PaneArea::Gutter { left, right });
-
-        assert_eq!(panes.len(), 4);
-        for info in &panes {
-            let ends_before = info.rect.x + info.rect.width <= gutter.x;
-            let starts_after = info.rect.x >= gutter.x + gutter.width;
-            assert!(
-                ends_before || starts_after,
-                "pane {:?} overlaps the gutter {gutter:?}",
-                info.rect
+        let area = Rect::new(3, 7, 120, 80);
+        let splits = layout.splits(area);
+        assert_eq!(splits.len(), 3);
+        for (split, (path, direction, pos, rect)) in splits.iter().zip([
+            (vec![], Direction::Horizontal, 63, area),
+            (
+                vec![false],
+                Direction::Vertical,
+                47,
+                Rect::new(3, 7, 60, 80),
+            ),
+            (
+                vec![true],
+                Direction::Vertical,
+                27,
+                Rect::new(63, 7, 60, 80),
+            ),
+        ]) {
+            assert_eq!(
+                (split.path.clone(), split.direction, split.pos, split.area),
+                (path, direction, pos, rect)
             );
         }
-        // the subtree that owned the seam still owns everything right of it
-        assert_eq!(panes[0].rect, left);
+        assert!(layout.set_ratio_at(&splits[2].path, 0.5));
+        let resized = layout.splits(area);
+        assert_eq!(resized[1].pos, splits[1].pos);
+        assert_eq!(resized[2].pos, 47);
     }
 
     #[test]
-    fn the_root_boundary_is_not_a_draggable_split_under_a_gutter() {
-        let layout = sample_layout();
-        let area = Rect::new(0, 0, 200, 20);
-        let (left, _, right) = layout.gutter_areas(area, 26).unwrap();
-
-        let borders = layout.splits_in(PaneArea::Gutter { left, right });
-
-        assert_eq!(layout.splits(area).len(), 3);
-        assert_eq!(borders.len(), 2);
-        assert!(borders.iter().all(|border| !border.path.is_empty()));
+    fn rejected_splits_and_insertions_preserve_layout_and_focus_history() {
+        let (mut layout, root) = TileLayout::new();
+        let second = layout.split_focused(Direction::Horizontal);
+        let absent = PaneId::alloc();
+        let before = pane_rects(&layout);
+        let splits = split_snapshot(&layout);
+        assert!(layout
+            .split_pane(absent, Direction::Vertical, 0.5)
+            .is_none());
+        for (target, moved) in [(absent, PaneId::alloc()), (root, second), (root, root)] {
+            assert!(!layout.insert_pane_near(target, moved, Direction::Vertical, 0.3, true));
+        }
+        assert_eq!(pane_rects(&layout), before);
+        assert_eq!(split_snapshot(&layout), splits);
+        assert_eq!(layout.focused(), second);
+        assert_eq!(layout.prev_focus, Some(root));
+        assert!(layout.close_focused());
+        assert_eq!(layout.focused(), root);
     }
 
     #[test]
-    fn whole_pane_area_lays_out_exactly_as_before() {
-        let layout = sample_layout();
-        let area = Rect::new(0, 0, 200, 20);
-
-        let rects: Vec<_> = layout
-            .panes_in(PaneArea::Whole(area))
-            .iter()
-            .map(|info| info.rect)
-            .collect();
-
+    fn splitting_a_deep_leaf_preserves_other_branches_and_focus() {
+        let (mut layout, root) = TileLayout::new();
+        let right = layout.split_pane(root, Direction::Horizontal, 0.6).unwrap();
+        let bottom_left = layout.split_pane(root, Direction::Vertical, 0.4).unwrap();
+        let right_rect = pane_rect(&layout, right);
+        let focus = layout.focused();
+        let new = layout
+            .split_pane(bottom_left, Direction::Horizontal, f32::NAN)
+            .unwrap();
+        assert_eq!(layout.pane_ids(), [root, bottom_left, new, right]);
+        assert_eq!(pane_rect(&layout, right), right_rect);
+        assert_eq!(layout.focused(), focus);
         assert_eq!(
-            rects,
-            layout
-                .panes(area)
-                .iter()
-                .map(|info| info.rect)
-                .collect::<Vec<_>>()
+            split_snapshot(&layout),
+            [
+                (Direction::Horizontal, 0.6),
+                (Direction::Vertical, 0.4),
+                (Direction::Horizontal, 0.5)
+            ]
         );
+    }
+
+    #[test]
+    fn panes_after_split_predicts_the_real_split_geometry() {
+        let area = Rect::new(3, 1, 121, 37);
+        let (mut layout, root) = TileLayout::new();
+        let right = layout.split_pane(root, Direction::Horizontal, 0.6).unwrap();
+        let bottom_left = layout.split_pane(root, Direction::Vertical, 0.4).unwrap();
+        for (target, direction, ratio) in [
+            (bottom_left, Direction::Horizontal, 0.5),
+            (right, Direction::Vertical, 0.3),
+            (root, Direction::Horizontal, f32::NAN),
+        ] {
+            let (predicted, new_index) = layout
+                .panes_after_split(area, target, direction, ratio)
+                .unwrap();
+            let new_id = layout.split_pane(target, direction, ratio).unwrap();
+            let actual: Vec<_> = layout
+                .panes(area)
+                .into_iter()
+                .map(|info| info.rect)
+                .collect();
+            assert_eq!(
+                predicted.iter().map(|info| info.rect).collect::<Vec<_>>(),
+                actual
+            );
+            assert_eq!(layout.pane_ids()[new_index], new_id);
+        }
+        assert!(layout
+            .panes_after_split(area, PaneId::alloc(), Direction::Vertical, 0.5)
+            .is_none());
+    }
+
+    #[test]
+    #[ignore = "manual BSP allocation and traversal scaling profile"]
+    fn bsp_layout_profile() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+        fn build(count: usize, balanced: bool) -> TileLayout {
+            let (mut layout, root) = TileLayout::new();
+            let mut leaves = std::collections::VecDeque::from([root]);
+            for _ in 1..count {
+                let target = leaves.pop_front().unwrap();
+                let new = layout
+                    .split_pane(target, Direction::Horizontal, 0.5)
+                    .unwrap();
+                if balanced {
+                    leaves.push_back(target);
+                }
+                leaves.push_back(new);
+            }
+            layout
+        }
+        fn measure(mut operation: impl FnMut()) -> f64 {
+            for _ in 0..32 {
+                operation();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = Instant::now();
+                let mut iterations = 0;
+                while start.elapsed() < Duration::from_millis(20) {
+                    operation();
+                    iterations += 1;
+                }
+                samples.push(start.elapsed().as_secs_f64() * 1e6 / f64::from(iterations));
+            }
+            samples.sort_by(f64::total_cmp);
+            samples[3]
+        }
+        for count in [1, 15, 128, 512] {
+            for balanced in [true, false] {
+                let layout = build(count, balanced);
+                let splits = measure(|| {
+                    black_box(layout.splits(Rect::new(0, 0, 120, 40)));
+                });
+                let build = measure(|| {
+                    black_box(build(count, balanced));
+                });
+                println!("bsp panes={count} balanced={balanced} splits_us={splits:.3} build_us={build:.3}");
+            }
+        }
+    }
+
+    fn pane(id: u32) -> PaneId {
+        PaneId::from_raw(id)
     }
 
     fn sample_layout() -> TileLayout {

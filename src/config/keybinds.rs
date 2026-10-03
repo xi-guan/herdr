@@ -10,10 +10,36 @@ use crate::popup_size::PopupSize;
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
 
+/// Built-in prefix used when `keys.prefix` is unset or invalid.
+pub(crate) const DEFAULT_PREFIX: KeyCombo = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+
 #[derive(Debug, Clone)]
 pub struct LiveKeybindConfig {
-    pub prefix: KeyCombo,
+    /// Every configured prefix key. The first entry is the primary prefix used
+    /// for compact display; all entries enter prefix mode.
+    pub prefix: Vec<KeyCombo>,
     pub keybinds: Keybinds,
+}
+
+impl LiveKeybindConfig {
+    /// Whether `key` is one of the configured prefix keys.
+    pub fn matches_prefix(&self, key: &TerminalKey) -> bool {
+        self.prefix
+            .iter()
+            .any(|combo| terminal_key_matches_combo(key, *combo))
+    }
+
+    /// Primary prefix combo, used for the compact status bar.
+    pub fn primary_prefix(&self) -> Option<KeyCombo> {
+        self.prefix.first().copied()
+    }
+
+    /// Primary prefix rendered for the compact status bar.
+    pub fn primary_prefix_label(&self) -> String {
+        self.primary_prefix()
+            .map(format_key_combo)
+            .unwrap_or_else(|| format_key_combo(DEFAULT_PREFIX))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -42,6 +68,13 @@ impl BindingConfig {
         match self {
             Self::One(value) => vec![value.as_str()],
             Self::Many(values) => values.iter().map(String::as_str).collect(),
+        }
+    }
+
+    pub(crate) fn into_values(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
         }
     }
 
@@ -169,6 +202,18 @@ pub struct ActionKeybinds {
 }
 
 impl ActionKeybinds {
+    pub(crate) fn from_labels(labels: &[String]) -> Result<Self, String> {
+        let mut bindings = Vec::new();
+        for label in labels {
+            match parse_binding_string(label) {
+                Some(ParsedBinding::Single(binding)) => bindings.push(binding),
+                Some(ParsedBinding::Range(range)) => bindings.extend(range),
+                None => return Err(format!("invalid endpoint command binding: {label}")),
+            }
+        }
+        Ok(Self { bindings })
+    }
+
     #[cfg(test)]
     pub fn prefix(label: &str) -> Self {
         let raw = if label.starts_with("prefix+") {
@@ -314,7 +359,6 @@ pub struct Keybinds {
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
-    pub hide_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
@@ -336,6 +380,7 @@ pub struct Keybinds {
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
+    pub clear_pane: ActionKeybinds,
     pub copy_mode: ActionKeybinds,
     pub focus_pane_left: ActionKeybinds,
     pub focus_pane_down: ActionKeybinds,
@@ -385,16 +430,19 @@ struct RegisteredBinding {
 }
 
 struct BindingRegistry {
-    prefix_combo: KeyCombo,
+    prefix_combos: Vec<KeyCombo>,
     prefix_source: BindingSource,
     direct: std::collections::HashMap<KeyCombo, RegisteredBinding>,
     prefix: std::collections::HashMap<KeyCombo, RegisteredBinding>,
 }
 
 impl BindingRegistry {
-    fn new(prefix_combo: KeyCombo, prefix_source: BindingSource) -> Self {
+    fn new(prefix_combos: Vec<KeyCombo>, prefix_source: BindingSource) -> Self {
+        let mut normalized: Vec<KeyCombo> =
+            prefix_combos.into_iter().map(normalize_key_combo).collect();
+        normalized.dedup();
         Self {
-            prefix_combo: normalize_key_combo(prefix_combo),
+            prefix_combos: normalized,
             prefix_source,
             direct: std::collections::HashMap::new(),
             prefix: std::collections::HashMap::new(),
@@ -410,8 +458,18 @@ impl BindingRegistry {
             });
     }
 
+    /// Reserve every configured prefix key as a direct/modifier key so no
+    /// action can hijack it before prefix mode starts.
+    fn reserve_prefix_keys(&mut self, field: &str, source: BindingSource) {
+        let combos = self.prefix_combos.clone();
+        for combo in combos {
+            self.reserve_direct(combo, field, source);
+        }
+    }
+
     fn prefix_rhs_is_reserved(&self, combo: KeyCombo) -> bool {
-        normalize_key_combo(combo) == self.prefix_combo
+        let combo = normalize_key_combo(combo);
+        self.prefix_combos.contains(&combo)
     }
 
     fn conflict(&self, binding: &ResolvedBinding) -> Option<&RegisteredBinding> {
@@ -438,14 +496,14 @@ impl BindingRegistry {
 }
 
 impl Config {
-    pub(super) fn validated_keybinds(&self) -> (Option<String>, KeyCombo, Vec<String>, Keybinds) {
-        let mut diagnostics = Vec::new();
-        let (prefix, prefix_diag) = parse_key_combo_with_diagnostic(
-            &self.keys.prefix,
-            "keys.prefix",
-            (KeyCode::Char('b'), KeyModifiers::CONTROL),
-        );
+    pub(super) fn validated_keybinds(
+        &self,
+    ) -> (Option<String>, Vec<KeyCombo>, Vec<String>, Keybinds) {
+        let (prefix_keys, prefix_diag, mut diagnostics) = parse_prefix_keys(&self.keys.prefix);
         if let Some(diag) = &prefix_diag {
+            warn!(message = %diag, "config diagnostic");
+        }
+        for diag in &diagnostics {
             warn!(message = %diag, "config diagnostic");
         }
 
@@ -454,11 +512,12 @@ impl Config {
         } else {
             BindingSource::Default
         };
-        let mut registry = BindingRegistry::new(prefix, prefix_source);
-        registry.reserve_direct(prefix, "keys.prefix", prefix_source);
-        let mut navigate_registry = BindingRegistry::new(prefix, prefix_source);
-        navigate_registry.reserve_direct(prefix, "keys.prefix", prefix_source);
+        let mut registry = BindingRegistry::new(prefix_keys.clone(), prefix_source);
+        registry.reserve_prefix_keys("keys.prefix", prefix_source);
+        let mut navigate_registry = BindingRegistry::new(prefix_keys.clone(), prefix_source);
+        navigate_registry.reserve_prefix_keys("keys.prefix", prefix_source);
         reserve_navigate_runtime_keys(&mut navigate_registry);
+        let prefix = prefix_keys;
 
         macro_rules! empty_action {
             () => {
@@ -483,7 +542,6 @@ impl Config {
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
             close_workspace: empty_action!(),
-            hide_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
             detach: empty_action!(),
@@ -505,6 +563,7 @@ impl Config {
             close_tab: empty_action!(),
             rename_pane: empty_action!(),
             edit_scrollback: empty_action!(),
+            clear_pane: empty_action!(),
             copy_mode: empty_action!(),
             focus_pane_left: empty_action!(),
             focus_pane_down: empty_action!(),
@@ -612,7 +671,6 @@ impl Config {
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
-            apply_action!(keybinds.hide_workspace, hide_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
             apply_action!(keybinds.detach, detach, source);
@@ -653,6 +711,7 @@ impl Config {
             apply_action!(keybinds.close_tab, close_tab, source);
             apply_action!(keybinds.rename_pane, rename_pane, source);
             apply_action!(keybinds.edit_scrollback, edit_scrollback, source);
+            apply_action!(keybinds.clear_pane, clear_pane, source);
             apply_action!(keybinds.copy_mode, copy_mode, source);
             apply_action!(keybinds.focus_pane_left, focus_pane_left, source);
             apply_action!(keybinds.focus_pane_down, focus_pane_down, source);
@@ -1294,19 +1353,45 @@ fn single_key_char(s: &str) -> Option<char> {
     }
 }
 
-fn parse_key_combo_with_diagnostic(
-    s: &str,
-    field: &str,
-    fallback: KeyCombo,
-) -> (KeyCombo, Option<String>) {
-    match parse_key_combo(s) {
-        Some(binding) => (binding, None),
-        None => {
-            let diag = format!("invalid keybinding: {field} = {s:?}; using fallback");
-            warn!(message = %diag, "config diagnostic");
-            (fallback, Some(diag))
+/// Parse the configured prefix keys. Returns the effective list, an optional
+/// rejection diagnostic (used when nothing valid remains, so the caller keeps
+/// the previous keybinds), and per-entry diagnostics.
+fn parse_prefix_keys(config: &BindingConfig) -> (Vec<KeyCombo>, Option<String>, Vec<String>) {
+    let mut combos: Vec<KeyCombo> = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    for raw in config.values() {
+        let raw = raw.trim();
+        match parse_key_combo(raw) {
+            Some(combo) if !combos.contains(&combo) => combos.push(combo),
+            Some(_) => {}
+            None => diagnostics.push(format!(
+                "invalid keybinding: keys.prefix = {raw:?}; ignoring prefix"
+            )),
         }
     }
+
+    if combos.is_empty() {
+        let reject = Some(format!(
+            "invalid keybinding: keys.prefix; using fallback {}",
+            format_key_combo(DEFAULT_PREFIX)
+        ));
+        return (vec![DEFAULT_PREFIX], reject, diagnostics);
+    }
+
+    (combos, None, diagnostics)
+}
+
+/// Render all configured prefix keys for the help panel.
+pub fn format_prefix_combos(prefixes: &[KeyCombo]) -> String {
+    if prefixes.is_empty() {
+        return format_key_combo(DEFAULT_PREFIX);
+    }
+    prefixes
+        .iter()
+        .map(|combo| format_key_combo(*combo))
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 pub fn normalize_key_combo((mut code, mut modifiers): KeyCombo) -> KeyCombo {
@@ -1520,8 +1605,8 @@ prefix = "ö"
         )
         .unwrap();
         assert_eq!(
-            config.prefix_key(),
-            (KeyCode::Char('ö'), KeyModifiers::empty())
+            config.prefix_keys(),
+            vec![(KeyCode::Char('ö'), KeyModifiers::empty())]
         );
         assert!(config.collect_diagnostics().is_empty());
     }
@@ -1612,18 +1697,10 @@ next_tab = "prefix+n"
         );
     }
 
-    /// tmux binds last-pane to `prefix+;`, and going back to where you jumped from is
-    /// the other half of `prefix+o`, so it is worth a default rather than a mention.
     #[test]
-    fn last_pane_uses_tmux_prefix_semicolon_by_default() {
+    fn back_and_forth_keybinds_are_unset_by_default() {
         let kb = Config::default().keybinds();
-        assert_eq!(
-            binding_triggers(&kb.last_pane),
-            vec![BindingTrigger::Prefix((
-                KeyCode::Char(';'),
-                KeyModifiers::empty()
-            ))]
-        );
+        assert!(kb.last_pane.bindings.is_empty());
     }
 
     #[test]
@@ -1815,6 +1892,84 @@ help = "prefix+ctrl+b"
         )
         .unwrap();
         assert!(!config.keybinds().help.bindings.is_empty());
+    }
+
+    #[test]
+    fn multiple_prefix_keys_parse_reserve_and_share_prefix_bindings() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = ["ctrl+space", "ctrl+s"]
+help = "prefix+?"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.prefix_keys(),
+            vec![
+                (KeyCode::Char(' '), KeyModifiers::CONTROL),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ]
+        );
+        assert!(config.collect_diagnostics().is_empty());
+
+        // A prefix action works regardless of which prefix key started prefix mode.
+        let help = &config.keybinds().help;
+        assert!(
+            help.matches_prefix_key(&TerminalKey::new(KeyCode::Char('?'), KeyModifiers::empty()))
+        );
+
+        // Every prefix key is reserved as a prefix-mode right-hand side.
+        let reserved: Config = toml::from_str(
+            r#"
+[keys]
+prefix = ["ctrl+space", "ctrl+s"]
+help = "prefix+ctrl+s"
+"#,
+        )
+        .unwrap();
+        assert!(reserved.keybinds().help.bindings.is_empty());
+        assert!(reserved
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("reserved keybinding")));
+    }
+
+    #[test]
+    fn invalid_prefix_entries_are_dropped_while_valid_ones_survive() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = ["ctrl+a", "wat"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.prefix_keys(),
+            vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("keys.prefix") && diag.contains("ignoring prefix")));
+    }
+
+    #[test]
+    fn empty_prefix_list_is_rejected_and_keeps_the_fallback() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = []
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.prefix_keys(), vec![DEFAULT_PREFIX]);
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("keys.prefix")));
+        // A reload treats the empty list as invalid and keeps the current keybinds.
+        assert!(config.live_keybinds_with_diagnostics().is_err());
     }
 
     #[test]

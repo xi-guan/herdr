@@ -74,17 +74,9 @@ pub enum Subscription {
     },
     #[serde(rename = "pane.agent_status_changed")]
     PaneAgentStatusChanged {
-        /// omitted = every pane, served straight from the event hub
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pane_id: Option<String>,
+        pane_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_status: Option<AgentStatus>,
-    },
-    #[serde(rename = "pane.output_changed")]
-    PaneOutputChanged {
-        /// omitted = every pane
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pane_id: Option<String>,
     },
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
@@ -380,8 +372,6 @@ pub enum SubscriptionEventKind {
     PaneAgentStatusChanged,
     #[serde(rename = "pane.scroll_changed")]
     ScrollChanged,
-    #[serde(rename = "pane.output_changed")]
-    OutputChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -396,7 +386,6 @@ pub enum SubscriptionEventData {
     PaneOutputMatched(PaneOutputMatchedEvent),
     PaneAgentStatusChanged(PaneAgentStatusChangedEvent),
     ScrollChanged(PaneScrollChangedEvent),
-    OutputChanged(PaneOutputChangedEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -426,14 +415,6 @@ pub struct PaneScrollChangedEvent {
     pub pane_id: String,
     pub workspace_id: String,
     pub scroll: PaneScrollInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneOutputChangedEvent {
-    pub pane_id: String,
-    pub workspace_id: String,
-    /// the pane's `content_revision` at emit time; later events carry larger values
-    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
