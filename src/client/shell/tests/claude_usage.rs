@@ -100,10 +100,11 @@ fn usage_stays_clear_of_the_configured_status() {
 // dropping the figures is the only answer that does not push a tab off the edge
 #[test]
 fn usage_gives_way_rather_than_crowding_the_tabs() {
-    let mut state = shell_with(with_usage(
-        vec![window("session", 3, Some(FAR_FUTURE))],
-        None,
-    ));
+    let mut projected = with_usage(vec![window("session", 3, Some(FAR_FUTURE))], None);
+    // a named tab, because a lone numbered one draws no chip to crowd
+    projected.tabs[0].label = "one".into();
+    projected.tabs[0].custom_label = true;
+    let mut state = shell_with(projected);
 
     let row = bar_row(&mut state, 40);
 
