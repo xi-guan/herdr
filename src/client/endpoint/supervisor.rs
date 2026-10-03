@@ -21,6 +21,7 @@ pub(crate) struct EndpointConnectOptions {
     pub(crate) cell_height_px: u32,
     pub(crate) pixel_geometry_exact: bool,
     pub(crate) surface_size: ClientSurfaceSize,
+    pub(crate) surface_reserved_columns: u16,
     pub(crate) endpoint_keybindings: bool,
     pub(crate) mouse_capture: bool,
 }
@@ -299,7 +300,7 @@ fn connect_once(
         options.cell_width_px,
         options.cell_height_px,
         options.pixel_geometry_exact,
-        Some(options.surface_size),
+        Some((options.surface_size, options.surface_reserved_columns)),
         options.endpoint_keybindings,
         options.mouse_capture,
         false,

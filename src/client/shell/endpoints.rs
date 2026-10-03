@@ -21,6 +21,8 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
+    /// whether this endpoint leaves surface columns free for the client when asked
+    pub(crate) surface_reservation_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
 }
 
@@ -87,6 +89,8 @@ impl ClientShellState {
                     .and_then(|endpoint| endpoint.pending_agent_view_projection.clone()),
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
+                surface_reservation_supported: previous
+                    .is_some_and(|endpoint| endpoint.surface_reservation_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
             });
         }
@@ -133,6 +137,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.surface_reservation_supported = false;
         }
     }
 
@@ -187,6 +192,20 @@ impl ClientShellState {
                 endpoint.agent_view_projection = None;
                 endpoint.pending_agent_view_projection = None;
             }
+        }
+    }
+
+    pub(crate) fn set_endpoint_surface_reservation_supported(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        supported: bool,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.surface_reservation_supported = supported;
         }
     }
 
@@ -741,6 +760,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         agent_view_projection: None,
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
+        surface_reservation_supported: false,
         methods: None,
     }
 }

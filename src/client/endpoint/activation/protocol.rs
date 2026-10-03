@@ -110,6 +110,13 @@ pub(super) fn resize_geometry(
         crate::protocol::ClientMessage::ClientShellResize { surface_size, .. } => {
             Some(*surface_size)
         }
+        crate::protocol::ClientMessage::EndpointControl { kind, data }
+            if kind == crate::protocol::endpoint::SURFACE_RESIZE_KIND =>
+        {
+            serde_json::from_str::<crate::protocol::endpoint::EndpointSurfaceResize>(data)
+                .ok()
+                .map(|resize| resize.surface_size)
+        }
         _ => None,
     }
 }

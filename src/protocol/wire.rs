@@ -981,6 +981,9 @@ pub struct ClientShellSnapshot {
     // optional like claude_usage: the frozen v1 snapshot and servers without hiding still decode
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_workspaces: Vec<ClientShellHiddenWorkspace>,
+    /// the part of this client's pane surface the endpoint left free for the client's own chrome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_reservation: Option<SurfaceRect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2933,11 +2936,26 @@ mod tests {
                 label: "away".into(),
                 cwd: "/repo/away".into(),
             }],
+            surface_reservation: Some(SurfaceRect {
+                x: 40,
+                y: 0,
+                width: 26,
+                height: 19,
+            }),
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+        // the endpoint path carries the snapshot as json, where the reservation must survive too
+        let ServerMessage::ClientShellSnapshot(snapshot) = &msg else {
+            unreachable!("built as a snapshot");
+        };
+        let json = serde_json::to_string(snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientShellSnapshot>(&json).unwrap(),
+            **snapshot
+        );
     }
 
     #[test]

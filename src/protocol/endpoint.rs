@@ -31,6 +31,29 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+/// the endpoint leaves `reserved_columns` of a surface free and reports where in the snapshot.
+pub const SURFACE_RESERVATION_CAPABILITY: &str = "surface_reservation";
+pub const SURFACE_RESIZE_KIND: &str = "endpoint.surface.resize.v1";
+
+/// a surface resize that carries a reservation; the frozen binary resize has no room for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointSurfaceResize {
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
+    pub surface_size: ClientSurfaceSize,
+    pub pixel_mouse: bool,
+    #[serde(default)]
+    pub reserved_columns: u16,
+}
+
+impl EndpointSurfaceResize {
+    pub fn message(&self) -> serde_json::Result<super::ClientMessage> {
+        Ok(super::ClientMessage::EndpointControl {
+            kind: SURFACE_RESIZE_KIND.into(),
+            data: serde_json::to_string(self)?,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -72,6 +95,9 @@ pub struct EndpointClientHello {
     pub input_codecs: Vec<String>,
     #[serde(default)]
     pub blob_codecs: Vec<String>,
+    /// columns of `surface_size` the client keeps for its own chrome; ignored by older endpoints.
+    #[serde(default)]
+    pub surface_reserved_columns: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +200,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                SURFACE_RESERVATION_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -219,6 +246,7 @@ mod tests {
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+            surface_reserved_columns: 0,
         }
     }
 
@@ -249,6 +277,7 @@ mod tests {
             commands: Vec::new(),
             claude_usage: None,
             hidden_workspaces: Vec::new(),
+            surface_reservation: None,
         }
     }
 
@@ -307,6 +336,7 @@ mod tests {
         // an absent reading stays off the wire, so older clients see the v1 shape unchanged
         assert!(!data.contains("claude_usage"));
         assert!(!data.contains("hidden_workspaces"));
+        assert!(!data.contains("surface_reservation"));
         let decoded: ClientShellSnapshot = serde_json::from_str(&data).unwrap();
         assert_eq!(decoded, snapshot);
     }
@@ -376,6 +406,33 @@ mod tests {
         assert!(!decoded.surface_scroll);
     }
 
+    // a peer that never heard of reservations leaves the field out, which reserves nothing
+    #[test]
+    fn a_missing_reservation_reserves_nothing() {
+        let mut hello = serde_json::to_value(hello()).unwrap();
+        hello
+            .as_object_mut()
+            .unwrap()
+            .remove("surface_reserved_columns");
+        let hello: EndpointClientHello = serde_json::from_value(hello).unwrap();
+        assert_eq!(hello.surface_reserved_columns, 0);
+
+        let resize = EndpointSurfaceResize {
+            cell_width_px: 8,
+            cell_height_px: 16,
+            surface_size: ClientSurfaceSize {
+                cols: 106,
+                rows: 19,
+            },
+            pixel_mouse: true,
+            reserved_columns: 26,
+        };
+        let mut value = serde_json::to_value(resize).unwrap();
+        value.as_object_mut().unwrap().remove("reserved_columns");
+        let legacy: EndpointSurfaceResize = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.reserved_columns, 0);
+    }
+
     #[test]
     fn compatible_server_advertises_endpoint_lifecycle_capabilities() {
         let welcome = EndpointServerWelcome::compatible(Vec::new());
@@ -390,6 +447,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                SURFACE_RESERVATION_CAPABILITY.to_string(),
             ]
         );
     }

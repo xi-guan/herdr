@@ -419,6 +419,7 @@ pub(crate) enum ServerEvent {
         surface_reuse: bool,
         surface_delta: bool,
         surface_scroll: bool,
+        surface_reserved_columns: u16,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -498,6 +499,7 @@ pub(crate) enum ServerEvent {
         cell_width_px: u32,
         cell_height_px: u32,
         pixel_mouse: bool,
+        reserved_columns: u16,
     },
     /// A client-owned shell delivered semantic input to one stable pane target.
     ClientShellPaneInput {
@@ -787,6 +789,7 @@ pub(crate) fn handle_client_handshake(
                     hello.surface_reuse,
                     hello.surface_delta,
                     hello.surface_scroll,
+                    hello.surface_reserved_columns,
                 )),
             )
         }
@@ -884,6 +887,7 @@ pub(crate) fn handle_client_handshake(
         surface_reuse,
         surface_delta,
         surface_scroll,
+        surface_reserved_columns,
     )) = shell_options
     {
         ServerEvent::ClientShellConnected {
@@ -900,6 +904,7 @@ pub(crate) fn handle_client_handshake(
             surface_reuse,
             surface_delta,
             surface_scroll,
+            surface_reserved_columns,
             writer,
         }
     } else {
@@ -1172,6 +1177,42 @@ fn client_read_loop_with_endpoint_controls(
                     cell_width_px,
                     cell_height_px,
                     pixel_mouse,
+                    reserved_columns: 0,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::SURFACE_RESIZE_KIND =>
+            {
+                let resize = match serde_json::from_str::<
+                    crate::protocol::endpoint::EndpointSurfaceResize,
+                >(&data)
+                {
+                    Ok(resize) => resize,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid client shell surface resize, closing");
+                        let _ = server_event_tx
+                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        break;
+                    }
+                };
+                if let Some(reason) = client_shell_geometry_error(
+                    resize.surface_size,
+                    resize.cell_width_px,
+                    resize.cell_height_px,
+                ) {
+                    warn!(client_id, %reason, "invalid client shell resize, closing");
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    break;
+                }
+                ServerEvent::ClientShellResize {
+                    client_id,
+                    surface_cols: resize.surface_size.cols,
+                    surface_rows: resize.surface_size.rows,
+                    cell_width_px: resize.cell_width_px,
+                    cell_height_px: resize.cell_height_px,
+                    pixel_mouse: resize.pixel_mouse,
+                    reserved_columns: resize.reserved_columns,
                 }
             }
             ClientMessage::ClientShellHostTheme { update } => {
@@ -1481,6 +1522,7 @@ mod tests {
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
+            surface_reserved_columns: 0,
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -1995,11 +2037,13 @@ mod tests {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                surface_reserved_columns,
                 writer,
             } => {
                 assert!(!surface_reuse);
                 assert!(!surface_delta);
                 assert!(!surface_scroll);
+                assert_eq!(surface_reserved_columns, 0);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));
@@ -2314,6 +2358,32 @@ mod tests {
                 cell_width_px: 8,
                 cell_height_px: 16,
                 pixel_mouse: true,
+                reserved_columns: 0,
+            }
+        ));
+
+        // a reservation travels as a named control and resizes in the same event
+        protocol::write_message(
+            &mut client_stream,
+            &crate::protocol::endpoint::EndpointSurfaceResize {
+                cell_width_px: 8,
+                cell_height_px: 16,
+                surface_size: crate::protocol::ClientSurfaceSize { cols: 86, rows: 15 },
+                pixel_mouse: true,
+                reserved_columns: 26,
+            }
+            .message()
+            .expect("encode reserving resize"),
+        )
+        .expect("write reserving resize");
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "reserving resize"),
+            ServerEvent::ClientShellResize {
+                client_id: 7,
+                surface_cols: 86,
+                surface_rows: 15,
+                reserved_columns: 26,
+                ..
             }
         ));
 

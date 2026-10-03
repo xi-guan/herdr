@@ -254,7 +254,8 @@ fn settled_status_color(palette: &Palette) -> ratatui::style::Color {
     }
 }
 
-fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
+/// `hole` keeps chrome already drawn where the endpoint left the surface's columns free.
+fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect, hole: Rect) {
     let copy_width = source.width.min(area.width);
     let copy_height = source.height.min(area.height);
     let hyperlink_base = target.hyperlinks.len() as u32;
@@ -265,6 +266,9 @@ fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
             let source_index = row as usize * source.width as usize + col as usize;
             let target_x = area.x + col;
             let target_y = area.y + row;
+            if contains(hole, (target_x, target_y)) {
+                continue;
+            }
             let target_index = target_y as usize * target.width as usize + target_x as usize;
             let (Some(source_cell), Some(target_cell)) = (
                 source.cells.get(source_index),

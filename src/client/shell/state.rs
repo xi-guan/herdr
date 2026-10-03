@@ -18,6 +18,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) sidebar_max_width: u16,
     pub(super) sidebar_start_collapsed: bool,
     pub(super) sidebar_collapsed_mode: SidebarCollapsedModeConfig,
+    pub(super) sidebar_position: crate::config::SidebarPositionConfig,
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
@@ -58,7 +59,12 @@ pub(super) struct ClientShellLayout {
     pub sidebar: Rect,
     pub tab_bar: Rect,
     pub mobile_header: Rect,
+    /// where the endpoint's surface frame is placed
     pub pane_surface: Rect,
+    /// the terminal area overlays and popups belong to, which excludes columns at the edge
+    pub terminal: Rect,
+    /// columns of `pane_surface` kept for the sidebar, never drawn over by the frame
+    pub reserved: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1209,21 +1215,66 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        // the endpoint's report only places columns this client is still asking for
+        let reservation = (self.surface_reserved_columns(cols) > 0)
+            .then(|| {
+                self.snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.surface_reservation)
+            })
+            .flatten()
+            .map(|rect| Rect::new(rect.x, rect.y, rect.width, rect.height));
         self.config.layout(
             cols,
             rows,
             self.sidebar_collapsed,
             self.focused_tab_count(),
             self.sidebar_width,
+            reservation,
         )
     }
 
+    pub(crate) fn active_endpoint_id(&self) -> &ClientEndpointId {
+        &self.active_endpoint_id
+    }
+
+    /// columns this client asks the active endpoint to keep free for its sidebar.
+    pub(crate) fn surface_reserved_columns(&self, cols: u16) -> u16 {
+        self.surface_reserved_columns_for(&self.active_endpoint_id, cols)
+    }
+
+    pub(crate) fn surface_reserved_columns_for(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        cols: u16,
+    ) -> u16 {
+        let supported = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+            .is_some_and(|endpoint| endpoint.surface_reservation_supported);
+        self.config
+            .reserved_columns(cols, self.sidebar_collapsed, self.sidebar_width, supported)
+    }
+
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
-        let surface = self.layout(cols, rows).pane_surface;
-        ClientSurfaceSize {
-            cols: surface.width.max(1),
-            rows: surface.height.max(1),
-        }
+        self.surface_size_for(&self.active_endpoint_id, cols, rows)
+    }
+
+    pub(crate) fn surface_size_for(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        cols: u16,
+        rows: u16,
+    ) -> ClientSurfaceSize {
+        self.config.surface_size(
+            cols,
+            rows,
+            self.sidebar_collapsed,
+            self.focused_tab_count(),
+            self.sidebar_width,
+            self.surface_reserved_columns_for(endpoint_id, cols),
+        )
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {

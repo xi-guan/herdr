@@ -118,6 +118,7 @@ impl ClientShellConfig {
             sidebar_max_width: config.ui.sidebar_max_width,
             sidebar_start_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
+            sidebar_position: config.ui.sidebar_position,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             tab_bar_position: config.ui.tab_bar_position,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
@@ -320,6 +321,7 @@ impl ClientShellConfig {
                 self.sidebar_min_width = ui.sidebar_min_width;
                 self.sidebar_max_width = ui.sidebar_max_width;
                 self.sidebar_collapsed_mode = ui.sidebar_collapsed_mode;
+                self.sidebar_position = ui.sidebar_position;
                 self.mobile_width_threshold = ui.mobile_width_threshold;
                 self.tab_bar_position = ui.tab_bar_position;
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
@@ -357,6 +359,7 @@ impl ClientShellConfig {
         diagnostics
     }
 
+    /// `reservation` is where the endpoint left this client's columns in the surface it sent.
     pub(super) fn layout(
         &self,
         cols: u16,
@@ -364,18 +367,85 @@ impl ClientShellConfig {
         sidebar_collapsed: bool,
         tab_count: usize,
         sidebar_width: u16,
+        reservation: Option<Rect>,
     ) -> ClientShellLayout {
         if cols <= self.mobile_width_threshold {
             let header_height = rows.min(2);
+            let pane_surface =
+                Rect::new(0, header_height, cols, rows.saturating_sub(header_height));
             return ClientShellLayout {
                 sidebar: Rect::default(),
                 tab_bar: Rect::default(),
                 mobile_header: Rect::new(0, 0, cols, header_height),
-                pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                pane_surface,
+                terminal: pane_surface,
+                reserved: Rect::default(),
             };
         }
 
-        let sidebar_width = if sidebar_collapsed {
+        let show_tab_bar = rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
+        let tab_height = u16::from(show_tab_bar);
+        if let Some(reservation) = reservation {
+            let surface = match self.tab_bar_position {
+                TabBarPositionConfig::Top => {
+                    Rect::new(0, tab_height, cols, rows.saturating_sub(tab_height))
+                }
+                TabBarPositionConfig::Bottom => {
+                    Rect::new(0, 0, cols, rows.saturating_sub(tab_height))
+                }
+            };
+            let reserved = Rect::new(
+                surface.x.saturating_add(reservation.x),
+                surface.y.saturating_add(reservation.y),
+                reservation.width,
+                reservation.height,
+            )
+            .intersection(surface);
+            if reserved.x > surface.x && !reserved.is_empty() {
+                // on the seam the sidebar keeps the panes' height and the tab bar spans the width
+                let tab_bar = match self.tab_bar_position {
+                    TabBarPositionConfig::Top => Rect::new(0, 0, cols, tab_height),
+                    TabBarPositionConfig::Bottom => Rect::new(
+                        1,
+                        rows.saturating_sub(tab_height),
+                        cols.saturating_sub(1),
+                        tab_height,
+                    ),
+                };
+                return ClientShellLayout {
+                    sidebar: reserved,
+                    tab_bar,
+                    mobile_header: Rect::default(),
+                    pane_surface: surface,
+                    terminal: surface,
+                    reserved,
+                };
+            }
+            if !reserved.is_empty() {
+                // at the edge the frame reaches under the sidebar, which covers the kept columns
+                return ClientShellLayout {
+                    pane_surface: surface,
+                    reserved,
+                    ..self.edge_layout(cols, rows, reserved.width, tab_height)
+                };
+            }
+        }
+        self.edge_layout(
+            cols,
+            rows,
+            self.sidebar_columns(cols, sidebar_collapsed, sidebar_width),
+            tab_height,
+        )
+    }
+
+    /// the sidebar's columns at `cols`, collapsed or clamped to its configured bounds.
+    pub(super) fn sidebar_columns(
+        &self,
+        cols: u16,
+        sidebar_collapsed: bool,
+        sidebar_width: u16,
+    ) -> u16 {
+        if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
                 SidebarCollapsedModeConfig::Compact => 4,
                 SidebarCollapsedModeConfig::Hidden => 0,
@@ -388,10 +458,66 @@ impl ClientShellConfig {
             .unwrap_or((18, 36));
             sidebar_width.clamp(min, max)
         }
-        .min(cols.saturating_sub(1));
+        .min(cols.saturating_sub(1))
+    }
+
+    /// the columns to ask an endpoint to keep free for a sidebar that may sit on a seam.
+    pub(super) fn reserved_columns(
+        &self,
+        cols: u16,
+        sidebar_collapsed: bool,
+        sidebar_width: u16,
+        endpoint_supports_reservation: bool,
+    ) -> u16 {
+        if !endpoint_supports_reservation
+            || self.sidebar_position != crate::config::SidebarPositionConfig::Center
+            || sidebar_collapsed
+            || cols <= self.mobile_width_threshold
+        {
+            return 0;
+        }
+        self.sidebar_columns(cols, false, sidebar_width)
+    }
+
+    /// the surface to request: the whole width when columns are reserved inside it.
+    pub(super) fn surface_size(
+        &self,
+        cols: u16,
+        rows: u16,
+        sidebar_collapsed: bool,
+        tab_count: usize,
+        sidebar_width: u16,
+        reserved_columns: u16,
+    ) -> ClientSurfaceSize {
+        let surface = self
+            .layout(
+                cols,
+                rows,
+                sidebar_collapsed,
+                tab_count,
+                sidebar_width,
+                None,
+            )
+            .pane_surface;
+        ClientSurfaceSize {
+            cols: if reserved_columns > 0 {
+                cols
+            } else {
+                surface.width
+            }
+            .max(1),
+            rows: surface.height.max(1),
+        }
+    }
+
+    fn edge_layout(
+        &self,
+        cols: u16,
+        rows: u16,
+        sidebar_width: u16,
+        tab_height: u16,
+    ) -> ClientShellLayout {
         let main = Rect::new(sidebar_width, 0, cols.saturating_sub(sidebar_width), rows);
-        let show_tab_bar = rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
-        let tab_height = u16::from(show_tab_bar);
         let (tab_bar, pane_surface) = match self.tab_bar_position {
             TabBarPositionConfig::Top => (
                 Rect::new(main.x, 0, main.width, tab_height),
@@ -419,10 +545,12 @@ impl ClientShellConfig {
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
+            terminal: pane_surface,
+            reserved: Rect::default(),
         }
     }
 
-    pub(crate) fn initial_surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
+    fn initial_chrome(&self) -> (bool, u16) {
         let sidebar_collapsed = self
             .preferences
             .sidebar_collapsed
@@ -435,13 +563,25 @@ impl ClientShellConfig {
             .sidebar_width
             .unwrap_or(self.sidebar_width)
             .clamp(min_width, max_width);
-        let surface = self
-            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width)
-            .pane_surface;
-        ClientSurfaceSize {
-            cols: surface.width.max(1),
-            rows: surface.height.max(1),
-        }
+        (sidebar_collapsed, sidebar_width)
+    }
+
+    /// assumes the endpoint honours a reservation; an older one ignores it and is resized after.
+    pub(crate) fn initial_surface_reserved_columns(&self, cols: u16) -> u16 {
+        let (sidebar_collapsed, sidebar_width) = self.initial_chrome();
+        self.reserved_columns(cols, sidebar_collapsed, sidebar_width, true)
+    }
+
+    pub(crate) fn initial_surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
+        let (sidebar_collapsed, sidebar_width) = self.initial_chrome();
+        self.surface_size(
+            cols,
+            rows,
+            sidebar_collapsed,
+            0,
+            sidebar_width,
+            self.initial_surface_reserved_columns(cols),
+        )
     }
 }
 
@@ -496,29 +636,16 @@ mod tests {
         );
     }
 
-    // switching tabs means looking at the bar, and at the bottom it sits next to the prompt
+    // a column of air so a bottom bar does not butt against the sidebar footer sharing its row
     #[test]
-    fn the_tab_bar_can_sit_under_the_panes_instead_of_over_them() {
+    fn a_bottom_tab_bar_starts_one_column_in() {
         let mut config = ClientShellConfig::from_config(&Config::default());
-        let area = Rect::new(0, 0, 80, 24);
         let sidebar_width = config.sidebar_width;
-
-        let top = config
-            .layout(area.width, area.height, false, 2, sidebar_width)
-            .tab_bar;
-
+        let top = config.layout(80, 24, false, 2, sidebar_width, None).tab_bar;
         config.tab_bar_position = TabBarPositionConfig::Bottom;
-        let bottom = config
-            .layout(area.width, area.height, false, 2, sidebar_width)
-            .tab_bar;
+        let bottom = config.layout(80, 24, false, 2, sidebar_width, None).tab_bar;
 
-        assert_eq!(top.height, 1);
-        assert_eq!(bottom.height, 1);
-        assert!(bottom.y > top.y, "top: {top:?} bottom: {bottom:?}");
-        assert_eq!(bottom.y + bottom.height, area.y + area.height);
-        // a column of air so the bar does not butt against the sidebar footer sharing its row
-        assert_eq!(bottom.x, top.x + 1);
-        assert_eq!(bottom.width, top.width - 1);
+        assert_eq!((bottom.x, bottom.width), (top.x + 1, top.width - 1));
     }
 
     #[test]

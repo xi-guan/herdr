@@ -450,7 +450,10 @@ impl HeadlessServer {
                 });
             if changed {
                 if let Some(target) = self.shell_target_for_client(*client_id) {
-                    let area = Rect::new(0, 0, *cols, *rows);
+                    let area = crate::ui::SurfaceArea::new(
+                        Rect::new(0, 0, *cols, *rows),
+                        client.shell_reserved_columns,
+                    );
                     let layout = crate::ui::compute_tab_surface_for(
                         &self.app.state,
                         &self.app.terminal_runtimes,
@@ -520,10 +523,14 @@ impl HeadlessServer {
                 } else {
                     crate::kitty_graphics::HostCellSize::default()
                 };
+                let reserved = self
+                    .clients
+                    .get(&client_id)
+                    .map_or(0, |client| client.shell_reserved_columns);
                 let result = render_client_shell_pane_surface(
                     &mut self.app,
                     shell_target,
-                    area,
+                    crate::ui::SurfaceArea::new(area, reserved),
                     false,
                     shell_shows_popup,
                     render_cell_size,
@@ -574,6 +581,11 @@ impl HeadlessServer {
                 } else {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
+                // same pass as the surface, so the pair the client composes always agrees
+                candidate.surface_reservation = shell_render
+                    .as_ref()
+                    .and_then(|surface| surface.reserved)
+                    .map(Into::into);
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
@@ -675,6 +687,7 @@ impl HeadlessServer {
                         graphics,
                         graphics_delivery: next_graphics_delivery,
                         graphics_sources,
+                        ..
                     } = shell_render.expect("active shell surface");
                     surface_parts = Some((
                         panes,

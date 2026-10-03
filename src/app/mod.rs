@@ -479,6 +479,7 @@ impl App {
             view: state::ViewState {
                 terminal_area: Rect::default(),
                 pane_infos: Vec::new(),
+                reserved_columns: 0,
             },
             update_available,
             update_install_command,
@@ -2852,6 +2853,90 @@ mod tests {
         let spawned = size_of(&app, ws_idx, new_pane);
         relayout(&app, ws_idx);
         assert_eq!(size_of(&app, ws_idx, new_pane), spawned);
+
+        for (_terminal_id, runtime) in app.terminal_runtimes.drain().collect::<Vec<_>>() {
+            runtime.shutdown();
+        }
+    }
+
+    // a client keeping a seam for its sidebar changes the final size, so spawning must agree
+    #[tokio::test]
+    async fn hidden_panes_start_at_their_size_beside_a_reserved_seam() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("visible")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let area = crate::ui::SurfaceArea::new(Rect::new(0, 0, 120, 40), 26);
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            area,
+        );
+        assert_eq!(app.state.view.reserved_columns, 26);
+
+        let size_of = |app: &App, ws_idx: usize, pane_id| {
+            app.state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, ws_idx, pane_id)
+                .unwrap()
+                .current_size()
+        };
+        let relayout = |app: &App, ws_idx: usize| {
+            crate::ui::resize_tab_surface(
+                &app.state,
+                &app.terminal_runtimes,
+                ws_idx,
+                0,
+                area,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+        };
+
+        // a space opens as two columns, which is exactly the shape that takes the seam
+        let pair = app
+            .create_workspace_with_options(std::env::temp_dir(), false)
+            .unwrap();
+        let columns = app.state.workspaces[pair].tabs[0].layout.pane_ids();
+        let spawned: Vec<_> = columns
+            .iter()
+            .map(|pane| size_of(&app, pair, *pane))
+            .collect();
+        relayout(&app, pair);
+        let laid_out: Vec<_> = columns
+            .iter()
+            .map(|pane| size_of(&app, pair, *pane))
+            .collect();
+        assert_eq!(laid_out, spawned);
+        assert!(spawned[0].1 < 47, "left column spawned at {:?}", spawned[0]);
+
+        // splitting a lone pane right opens the seam, so the new pane is sized for it
+        let single = app
+            .create_workspace_with_launch_env(std::env::temp_dir(), false, Vec::new(), false)
+            .unwrap();
+        let root = app.state.workspaces[single].tabs[0].root_pane;
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "req_seam_split_size".into(),
+                method: crate::api::schema::Method::PaneSplit(
+                    crate::api::schema::PaneSplitParams {
+                        workspace_id: None,
+                        target_pane_id: Some(app.pane_info(single, root).unwrap().pane_id),
+                        direction: crate::api::schema::SplitDirection::Right,
+                        ratio: None,
+                        cwd: None,
+                        focus: false,
+                        right_click: Default::default(),
+                        env: Default::default(),
+                    },
+                ),
+            });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let (_, new_pane) = app
+            .parse_pane_id(response["result"]["pane"]["pane_id"].as_str().unwrap())
+            .unwrap();
+        let spawned = size_of(&app, single, new_pane);
+        relayout(&app, single);
+        assert_eq!(size_of(&app, single, new_pane), spawned);
 
         for (_terminal_id, runtime) in app.terminal_runtimes.drain().collect::<Vec<_>>() {
             runtime.shutdown();

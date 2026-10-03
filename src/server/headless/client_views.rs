@@ -576,13 +576,13 @@ impl HeadlessServer {
         let Some(client) = self.clients.get(&client_id) else {
             return false;
         };
-        let (cols, rows) = client.terminal_size;
         let cell_size = if client.cell_size.is_known() {
             client.cell_size
         } else {
             crate::kitty_graphics::HostCellSize::default()
         };
-        let area = Rect::new(0, 0, cols, rows);
+        // each tab finds its own seam, so background tabs are sized for the shape they will show
+        let area = client.surface_area();
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
@@ -611,7 +611,14 @@ impl HeadlessServer {
             .as_deref()
             .is_some_and(|owner| self.tab_id_for_target(target).as_deref() == Some(owner))
         {
-            let _ = resize_popup_runtime(&self.app, Rect::new(0, 0, cols, rows), cell_size);
+            let popup_area = self
+                .app
+                .state
+                .workspaces
+                .get(target.workspace_index)
+                .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                .map_or(area.unreserved(), |tab| area.tab_area(tab).0.bounds());
+            let _ = resize_popup_runtime(&self.app, popup_area, cell_size);
         }
         true
     }

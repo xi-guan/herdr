@@ -722,6 +722,7 @@ async fn client_shell_attach_seeds_workspace() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 6,
             surface_cols: 80,
             surface_rows: 23,
@@ -765,6 +766,7 @@ async fn completion_guard_endpoint_pairs_runtime_completions_with_snapshots() {
         surface_reuse: false,
         surface_delta: false,
         surface_scroll: false,
+        surface_reserved_columns: 0,
         writer,
     });
     let (_, initial) = client_shell_projection(&control_rx);
@@ -814,6 +816,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id,
             surface_cols: 80,
             surface_rows: 23,
@@ -933,6 +936,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 77,
             surface_cols: 80,
             surface_rows: 23,
@@ -1036,6 +1040,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 7,
             surface_cols: 80,
             surface_rows: 23,
@@ -1204,6 +1209,7 @@ fn connect_test_shell(
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id,
             surface_cols,
             surface_rows,
@@ -1809,6 +1815,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 13,
             surface_cols: 80,
             surface_rows: 23,
@@ -1834,6 +1841,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 14,
             surface_cols: 80,
             surface_rows: 23,
@@ -2521,6 +2529,7 @@ async fn client_shell_tabs_render_accept_input_and_resize_independently() {
         cell_width_px: 0,
         cell_height_px: 0,
         pixel_mouse: false,
+        reserved_columns: 0,
     }));
     let resized_second = server.app.state.workspaces[0].test_runtimes[&second_pane].current_size();
     assert_ne!(resized_second, second_size);
@@ -2542,6 +2551,77 @@ async fn client_shell_tabs_render_accept_input_and_resize_independently() {
         server.app.state.workspaces[0].test_runtimes[&second_pane].current_size();
     assert_ne!(singleton_first, first_size);
     assert_eq!(singleton_first, singleton_second);
+    shutdown_test_runtimes(&mut server);
+}
+
+// the client places its sidebar from the snapshot paired with the very surface it sits in
+#[tokio::test]
+async fn a_reserving_shell_is_told_where_its_columns_were_left() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("centered");
+    let left = workspace.tabs[0].root_pane;
+    let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let single_tab = workspace.test_add_tab(Some("single"));
+    let single = workspace.tabs[single_tab].root_pane;
+    for (pane, text) in [
+        (left, &b"LEFT"[..]),
+        (right, &b"RIGHT"[..]),
+        (single, &b"SINGLE"[..]),
+    ] {
+        workspace.insert_test_runtime(
+            pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, text),
+        );
+    }
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (writer, control, render) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            surface_reserved_columns: 26,
+            client_id: 31,
+            surface_cols: 106,
+            surface_rows: 19,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: true,
+            writer,
+        })
+    );
+    let seed = client_shell_snapshot(&control);
+    assert_eq!(seed.surface_reservation, None);
+    // the hidden single-pane tab keeps the reservation at its edge, not on a seam it lacks
+    let single_size = server.app.state.workspaces[0].test_runtimes[&single].current_size();
+    assert_eq!(single_size.1, 106 - 26 - 1);
+
+    server.render_and_stream();
+    let snapshot = client_shell_snapshot(&control);
+    let surface = recv_pane_surface(&render, "centered surface");
+    assert_eq!(surface.projection_revision, snapshot.revision);
+    assert_eq!(
+        snapshot.surface_reservation,
+        Some(protocol::SurfaceRect {
+            x: 40,
+            y: 0,
+            width: 26,
+            height: 19,
+        })
+    );
+    assert_eq!((surface.frame.width, surface.frame.height), (106, 19));
+    let mut rects: Vec<_> = surface.panes.iter().map(|pane| pane.rect).collect();
+    rects.sort_by_key(|rect| rect.x);
+    assert_eq!(rects[0].x + rects[0].width, 40);
+    assert_eq!(rects[1].x, 66);
+    assert!(surface.splits.is_empty());
     shutdown_test_runtimes(&mut server);
 }
 
@@ -2754,6 +2834,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 9,
             surface_cols: 80,
             surface_rows: 23,
@@ -3001,6 +3082,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_reserved_columns: 0,
             client_id: 12,
             surface_cols: 80,
             surface_rows: 23,
@@ -3055,6 +3137,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
         cell_width_px: 0,
         cell_height_px: 0,
         pixel_mouse: false,
+        reserved_columns: 0,
     }));
     assert_eq!(
         server
@@ -4872,6 +4955,7 @@ async fn pane_death_reconciles_each_client_view_and_focus() {
         cell_width_px: 0,
         cell_height_px: 0,
         pixel_mouse: false,
+        reserved_columns: 0,
     }));
     assert_ne!(
         server.app.state.workspaces[0].test_runtimes[&second_pane].current_size(),

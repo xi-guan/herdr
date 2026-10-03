@@ -133,6 +133,8 @@ pub(super) struct HandshakeResult {
     pub(super) encoding: RenderEncoding,
     pub(super) endpoint_methods: Option<Vec<String>>,
     pub(super) endpoint_capabilities: Option<Vec<String>>,
+    /// the surface the hello asked for, before the endpoint said what it honours
+    pub(super) shell_surface_size: Option<crate::protocol::ClientSurfaceSize>,
 }
 
 pub(crate) fn probe_endpoint_negotiation(
@@ -145,7 +147,7 @@ pub(crate) fn probe_endpoint_negotiation(
         0,
         0,
         false,
-        Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+        Some((crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }, 0)),
         false,
         false,
         false,
@@ -171,7 +173,8 @@ pub(super) fn do_handshake(
     cell_width_px: u32,
     cell_height_px: u32,
     exact_cell_size: bool,
-    shell_surface_size: Option<crate::protocol::ClientSurfaceSize>,
+    // a shell's surface and the columns it keeps for itself inside it
+    shell_surface: Option<(crate::protocol::ClientSurfaceSize, u16)>,
     endpoint_keybindings: bool,
     mouse_capture: bool,
     surface_active: bool,
@@ -181,8 +184,9 @@ pub(super) fn do_handshake(
         .set_nonblocking(false)
         .map_err(ClientError::ConnectionFailed)?;
 
-    let endpoint_shell = shell_surface_size.is_some();
-    let hello = if let Some(surface_size) = shell_surface_size {
+    let endpoint_shell = shell_surface.is_some();
+    let shell_surface_size = shell_surface.map(|(surface_size, _)| surface_size);
+    let hello = if let Some((surface_size, surface_reserved_columns)) = shell_surface {
         let hello = EndpointClientHello {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             cell_width_px,
@@ -205,6 +209,7 @@ pub(super) fn do_handshake(
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+            surface_reserved_columns,
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -292,6 +297,7 @@ pub(super) fn do_handshake(
             encoding: RenderEncoding::SemanticFrame,
             endpoint_methods: Some(welcome.methods),
             endpoint_capabilities: Some(welcome.capabilities),
+            shell_surface_size,
         });
     }
 
@@ -309,6 +315,7 @@ pub(super) fn do_handshake(
                 encoding,
                 endpoint_methods: None,
                 endpoint_capabilities: None,
+                shell_surface_size: None,
             })
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(
@@ -363,7 +370,7 @@ mod tests {
             0,
             0,
             false,
-            Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+            Some((crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }, 0)),
             false,
             false,
             false,

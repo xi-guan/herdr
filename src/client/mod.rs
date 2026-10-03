@@ -241,10 +241,12 @@ fn run_client_with_mode(
     let (cols, rows, cell_width_px, cell_height_px, exact_cell_size) =
         initial_terminal_geometry(pixel_geometry_enabled, kitty_graphics_enabled)?;
 
-    let shell_surface_size = loop_config
-        .shell_config
-        .as_ref()
-        .map(|shell| shell.initial_surface_size(cols, rows));
+    let shell_surface = loop_config.shell_config.as_ref().map(|shell| {
+        (
+            shell.initial_surface_size(cols, rows),
+            shell.initial_surface_reserved_columns(cols),
+        )
+    });
     // Healthy Local attaches directly; only an actual failure enters background recovery.
     let initial = initial_stream
         .map(|mut stream| {
@@ -255,7 +257,7 @@ fn run_client_with_mode(
                 cell_width_px,
                 cell_height_px,
                 exact_cell_size,
-                shell_surface_size,
+                shell_surface,
                 endpoint_keybindings,
                 loop_config.mouse_capture_active,
                 true,
@@ -496,6 +498,17 @@ async fn run_client_loop(
                     })
                 }),
         );
+        shell.set_endpoint_surface_reservation_supported(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.endpoint_capabilities.as_ref())
+                .is_some_and(|capabilities| {
+                    capabilities.iter().any(|capability| {
+                        capability == crate::protocol::endpoint::SURFACE_RESERVATION_CAPABILITY
+                    })
+                }),
+        );
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,
@@ -613,8 +626,21 @@ async fn run_client_loop(
             surface_decoder,
         )?;
         let mut registry = endpoint::EndpointRegistry::new(transport, 1, negotiation);
-        if state.shell.is_some() {
+        if let Some(shell) = state.shell.as_ref() {
             registry.send(&ClientMessage::ClientShellFocus { focused: true });
+            // the hello assumed a reservation; an endpoint without one needs the plain size
+            if Some(shell.surface_size(state.reported_size.0, state.reported_size.1))
+                != handshake.shell_surface_size
+            {
+                registry.send(&client_shell_resize_message(
+                    shell,
+                    state.reported_size.0,
+                    state.reported_size.1,
+                    state.reported_cell_size.0,
+                    state.reported_cell_size.1,
+                    state.pixel_geometry_exact,
+                ));
+            }
         }
         registry
     } else {
@@ -756,6 +782,7 @@ async fn run_client_loop(
                     cell_height_px: state.reported_cell_size.1,
                     pixel_geometry_exact: state.pixel_geometry_exact,
                     surface_size: shell.surface_size(state.reported_size.0, state.reported_size.1),
+                    surface_reserved_columns: shell.surface_reserved_columns(state.reported_size.0),
                     endpoint_keybindings: config.endpoint_keybindings,
                     mouse_capture: state.shell_mouse_capture_preference,
                 },
@@ -1328,11 +1355,18 @@ async fn run_client_loop(
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
+                    let surface_reservation_supported = negotiation.supports_capability(
+                        crate::protocol::endpoint::SURFACE_RESERVATION_CAPABILITY,
+                    );
                     let frame = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,
                             agent_view_projection_supported,
+                        );
+                        shell.set_endpoint_surface_reservation_supported(
+                            &endpoint_id,
+                            surface_reservation_supported,
                         );
                         shell.compose(state.reported_size.0, state.reported_size.1)
                     });

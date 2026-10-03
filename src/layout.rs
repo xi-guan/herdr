@@ -60,6 +60,29 @@ pub struct SplitBorder {
     pub path: Vec<bool>,
 }
 
+/// where panes tile; `Gutter` holds the root split's two sides apart around a reserved seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneArea {
+    Whole(Rect),
+    Gutter { left: Rect, right: Rect },
+}
+
+impl PaneArea {
+    /// the one box covering both sides and the gutter, for zoom and popups.
+    pub fn bounds(self) -> Rect {
+        match self {
+            Self::Whole(area) => area,
+            Self::Gutter { left, right } => Rect {
+                width: (right.x + right.width).saturating_sub(left.x),
+                ..left
+            },
+        }
+    }
+}
+
+// narrower than this a side holds a border pair and little else, so the seam is refused
+const MIN_GUTTER_SIDE: u16 = 20;
+
 /// Cardinal direction for pane navigation.
 #[derive(Debug, Clone, Copy)]
 pub enum NavDirection {
@@ -132,6 +155,7 @@ impl TileLayout {
     /// Compute pane rects as they will be after splitting `target`, without
     /// changing the layout. Returns the rects and the new pane's index; the
     /// new pane's entry carries `target`'s id.
+    #[cfg(test)]
     pub fn panes_after_split(
         &self,
         area: Rect,
@@ -139,7 +163,36 @@ impl TileLayout {
         direction: Direction,
         ratio: f32,
     ) -> Option<(Vec<PaneInfo>, usize)> {
-        let mut panes = self.panes(area);
+        self.panes_after_split_in(PaneArea::Whole(area), target, direction, ratio)
+    }
+
+    /// `panes_after_split`, honouring a reserved gutter when there is one.
+    pub fn panes_after_split_in(
+        &self,
+        area: PaneArea,
+        target: PaneId,
+        direction: Direction,
+        ratio: f32,
+    ) -> Option<(Vec<PaneInfo>, usize)> {
+        if let (PaneArea::Gutter { left, right }, Node::Pane(id)) = (area, &self.root) {
+            // splitting the lone pane makes the root, so the gutter parts the two halves
+            if *id != target {
+                return None;
+            }
+            let half = |rect: Rect, is_focused: bool| PaneInfo {
+                id: target,
+                rect,
+                inner_rect: rect,
+                scrollbar_rect: None,
+                borders: Borders::NONE,
+                is_focused,
+            };
+            return Some((
+                vec![half(left, self.focus == target), half(right, false)],
+                1,
+            ));
+        }
+        let mut panes = self.panes_in(area);
         let index = panes.iter().position(|info| info.id == target)?;
         let (first, second) = split_rect(panes[index].rect, direction, valid_split_ratio(ratio));
         panes[index].rect = first;
@@ -156,6 +209,63 @@ impl TileLayout {
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
         let mut result = Vec::new();
         collect_splits(&self.root, area, &mut Vec::new(), &mut result);
+        result
+    }
+
+    /// (left, gutter, right) on the root seam; none without a left/right root or room for both sides.
+    pub fn gutter_areas(&self, area: Rect, gutter: u16) -> Option<(Rect, Rect, Rect)> {
+        let Node::Split {
+            direction, ratio, ..
+        } = &self.root
+        else {
+            return None;
+        };
+        gutter_for(*direction, *ratio, area, gutter)
+    }
+
+    /// `gutter_areas` for the layout as it will be once `target` is split.
+    pub fn gutter_areas_after_split(
+        &self,
+        area: Rect,
+        gutter: u16,
+        target: PaneId,
+        direction: Direction,
+        ratio: f32,
+    ) -> Option<(Rect, Rect, Rect)> {
+        match &self.root {
+            Node::Pane(id) if *id == target => {
+                gutter_for(direction, valid_split_ratio(ratio), area, gutter)
+            }
+            Node::Pane(_) => None,
+            Node::Split { .. } => self.gutter_areas(area, gutter),
+        }
+    }
+
+    /// `panes`, honouring a reserved gutter when there is one.
+    pub fn panes_in(&self, area: PaneArea) -> Vec<PaneInfo> {
+        let PaneArea::Gutter { left, right } = area else {
+            return self.panes(area.bounds());
+        };
+        let Node::Split { first, second, .. } = &self.root else {
+            return self.panes(area.bounds());
+        };
+        let mut result = Vec::new();
+        collect_panes(first, left, self.focus, &mut result);
+        collect_panes(second, right, self.focus, &mut result);
+        result
+    }
+
+    /// `splits` without the root boundary under a gutter, which belongs to whatever fills it.
+    pub fn splits_in(&self, area: PaneArea) -> Vec<SplitBorder> {
+        let PaneArea::Gutter { left, right } = area else {
+            return self.splits(area.bounds());
+        };
+        let Node::Split { first, second, .. } = &self.root else {
+            return self.splits(area.bounds());
+        };
+        let mut result = Vec::new();
+        collect_splits(first, left, &mut vec![false], &mut result);
+        collect_splits(second, right, &mut vec![true], &mut result);
         result
     }
 
@@ -697,6 +807,40 @@ fn get_ratio_at(node: &Node, path: &[bool]) -> Option<f32> {
     }
 }
 
+fn gutter_for(
+    direction: Direction,
+    ratio: f32,
+    area: Rect,
+    gutter: u16,
+) -> Option<(Rect, Rect, Rect)> {
+    if direction != Direction::Horizontal {
+        return None;
+    }
+    let tiled = area.width.checked_sub(gutter)?;
+    // the seam lands where the root ratio already puts it, so saved ratios keep their meaning
+    let (left, right) = split_rect(
+        Rect {
+            width: tiled,
+            ..area
+        },
+        Direction::Horizontal,
+        ratio,
+    );
+    if left.width < MIN_GUTTER_SIDE || right.width < MIN_GUTTER_SIDE {
+        return None;
+    }
+    let gutter_rect = Rect {
+        x: left.x + left.width,
+        width: gutter,
+        ..area
+    };
+    let right = Rect {
+        x: gutter_rect.x + gutter,
+        ..right
+    };
+    Some((left, gutter_rect, right))
+}
+
 fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
     match direction {
         Direction::Horizontal => {
@@ -918,6 +1062,138 @@ mod tests {
             },
             pane(2),
         )
+    }
+
+    fn two_column_layout(ratio: f32) -> TileLayout {
+        TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        )
+    }
+
+    #[test]
+    fn gutter_sits_on_the_seam_the_root_ratio_already_chose() {
+        let layout = two_column_layout(0.5);
+        let area = Rect::new(0, 0, 106, 20);
+
+        let (left, gutter, right) = layout.gutter_areas(area, 26).unwrap();
+
+        assert_eq!(left, Rect::new(0, 0, 40, 20));
+        assert_eq!(gutter, Rect::new(40, 0, 26, 20));
+        assert_eq!(right, Rect::new(66, 0, 40, 20));
+        // no column is spent twice and none is lost
+        assert_eq!(left.width + gutter.width + right.width, area.width);
+    }
+
+    #[test]
+    fn gutter_moves_with_the_root_ratio() {
+        let area = Rect::new(0, 0, 106, 20);
+
+        let (_, narrow, _) = two_column_layout(0.35).gutter_areas(area, 26).unwrap();
+        let (_, wide, _) = two_column_layout(0.65).gutter_areas(area, 26).unwrap();
+
+        assert_eq!(narrow.x, 28);
+        assert_eq!(wide.x, 52);
+    }
+
+    #[test]
+    fn no_gutter_without_a_left_right_seam_to_sit_on() {
+        let area = Rect::new(0, 0, 106, 20);
+        let (single, _) = TileLayout::new();
+        assert_eq!(single.gutter_areas(area, 26), None);
+
+        let stacked = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        );
+        assert_eq!(stacked.gutter_areas(area, 26), None);
+    }
+
+    #[test]
+    fn no_gutter_when_it_would_starve_a_side() {
+        let layout = two_column_layout(0.5);
+        // 60 wide leaves 17 a side once 26 columns are taken out
+        assert_eq!(layout.gutter_areas(Rect::new(0, 0, 60, 20), 26), None);
+        assert_eq!(layout.gutter_areas(Rect::new(0, 0, 20, 20), 26), None);
+        // lopsided enough and the thin side starves even on a wide screen
+        assert_eq!(
+            two_column_layout(0.9).gutter_areas(Rect::new(0, 0, 106, 20), 26),
+            None
+        );
+    }
+
+    #[test]
+    fn panes_tile_either_side_of_the_gutter_without_entering_it() {
+        let layout = sample_layout();
+        let area = Rect::new(0, 0, 200, 20);
+        let (left, gutter, right) = layout.gutter_areas(area, 26).unwrap();
+
+        let panes = layout.panes_in(PaneArea::Gutter { left, right });
+
+        assert_eq!(panes.len(), 4);
+        for info in &panes {
+            let ends_before = info.rect.x + info.rect.width <= gutter.x;
+            let starts_after = info.rect.x >= gutter.x + gutter.width;
+            assert!(
+                ends_before || starts_after,
+                "pane {:?} overlaps the gutter {gutter:?}",
+                info.rect
+            );
+        }
+        // the subtree that owned the seam still owns everything right of it
+        assert_eq!(panes[0].rect, left);
+    }
+
+    #[test]
+    fn the_root_boundary_is_not_a_draggable_split_under_a_gutter() {
+        let layout = sample_layout();
+        let area = Rect::new(0, 0, 200, 20);
+        let (left, _, right) = layout.gutter_areas(area, 26).unwrap();
+
+        let borders = layout.splits_in(PaneArea::Gutter { left, right });
+
+        assert_eq!(layout.splits(area).len(), 3);
+        assert_eq!(borders.len(), 2);
+        assert!(borders.iter().all(|border| !border.path.is_empty()));
+    }
+
+    // a split that creates the root seam has to size its new pane for the gutter it opens
+    #[test]
+    fn splitting_a_lone_pane_sizes_both_halves_around_the_gutter_it_opens() {
+        let (layout, root) = TileLayout::new();
+        let area = Rect::new(0, 0, 106, 20);
+
+        let (left, gutter, right) = layout
+            .gutter_areas_after_split(area, 26, root, Direction::Horizontal, 0.5)
+            .unwrap();
+        let (panes, index) = layout
+            .panes_after_split_in(
+                PaneArea::Gutter { left, right },
+                root,
+                Direction::Horizontal,
+                0.5,
+            )
+            .unwrap();
+
+        assert_eq!(gutter, Rect::new(40, 0, 26, 20));
+        assert_eq!(index, 1);
+        assert_eq!(panes[0].rect, Rect::new(0, 0, 40, 20));
+        assert_eq!(panes[1].rect, Rect::new(66, 0, 40, 20));
+        // a stacked split opens no seam
+        assert_eq!(
+            layout.gutter_areas_after_split(area, 26, root, Direction::Vertical, 0.5),
+            None
+        );
     }
 
     fn pane_rects(layout: &TileLayout) -> Vec<(PaneId, Rect)> {

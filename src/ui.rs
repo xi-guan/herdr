@@ -42,7 +42,8 @@ use self::status::copy_feedback_rect;
 pub(crate) use self::status::{render_config_diagnostic_buffer, render_copy_feedback_buffer};
 pub(crate) use self::tab_surface::{
     compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
-    tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
+    tab_surface_cursor, tab_surface_hyperlinks, SurfaceArea, TabSurfaceLayout, TabSurfaceTarget,
+    TabSurfaceView,
 };
 pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{centered_popup_rect, modal_stack_areas};
@@ -76,12 +77,12 @@ pub fn compute_view_with_cell_size(
 pub(crate) fn compute_view_without_resizing_panes(
     app: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: impl Into<SurfaceArea>,
 ) {
     compute_view_internal(
         app,
         terminal_runtimes,
-        area,
+        area.into(),
         false,
         crate::kitty_graphics::HostCellSize::default(),
     );
@@ -90,28 +91,33 @@ pub(crate) fn compute_view_without_resizing_panes(
 fn compute_view_internal(
     app: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: impl Into<SurfaceArea>,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    let TabSurfaceLayout { pane_infos, .. } =
-        compute_tab_surface(app, terminal_runtimes, area, resize_panes, cell_size);
+    let area = area.into();
+    let TabSurfaceLayout {
+        pane_infos,
+        pane_bounds,
+        ..
+    } = compute_tab_surface(app, terminal_runtimes, area, resize_panes, cell_size);
 
     if resize_panes {
         resize_background_tab_panes(app, terminal_runtimes, area, cell_size);
-        resize_popup_pane(app, terminal_runtimes, area, cell_size);
+        resize_popup_pane(app, terminal_runtimes, pane_bounds, cell_size);
     }
 
     app.view = crate::app::ViewState {
-        terminal_area: area,
+        terminal_area: area.rect,
         pane_infos,
+        reserved_columns: area.reserved_columns,
     };
 }
 
 fn resize_background_tab_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: SurfaceArea,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     for (workspace_index, workspace) in app.workspaces.iter().enumerate() {

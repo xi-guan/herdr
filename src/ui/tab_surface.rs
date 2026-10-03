@@ -2,7 +2,7 @@ use ratatui::{layout::Rect, Frame};
 
 use super::panes::{compute_pane_infos_for_tab, render_panes, resize_tab_panes};
 use crate::app::AppState;
-use crate::layout::{PaneInfo, SplitBorder};
+use crate::layout::{PaneArea, PaneInfo, SplitBorder, TileLayout};
 use crate::protocol::CursorState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -12,10 +12,90 @@ pub(crate) struct TabSurfaceTarget {
     pub(crate) tab_index: usize,
 }
 
+/// a pane surface and the columns a client keeps free inside it for its own chrome.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SurfaceArea {
+    pub(crate) rect: Rect,
+    pub(crate) reserved_columns: u16,
+}
+
+impl From<Rect> for SurfaceArea {
+    fn from(rect: Rect) -> Self {
+        Self {
+            rect,
+            reserved_columns: 0,
+        }
+    }
+}
+
+impl SurfaceArea {
+    pub(crate) fn new(rect: Rect, reserved_columns: u16) -> Self {
+        Self {
+            rect,
+            reserved_columns,
+        }
+    }
+
+    // a reservation that would leave no pane column is not one the surface can honour
+    pub(crate) fn reserved(self) -> u16 {
+        if self.reserved_columns < self.rect.width {
+            self.reserved_columns
+        } else {
+            0
+        }
+    }
+
+    /// the surface with any reservation held at its left edge.
+    pub(crate) fn unreserved(self) -> Rect {
+        let reserved = self.reserved();
+        Rect {
+            x: self.rect.x.saturating_add(reserved),
+            width: self.rect.width - reserved,
+            ..self.rect
+        }
+    }
+
+    /// where a layout's panes tile and which columns stay free: its root seam, else the left edge.
+    pub(crate) fn layout_area(self, layout: &TileLayout, zoomed: bool) -> (PaneArea, Option<Rect>) {
+        let reserved = self.reserved();
+        if reserved == 0 {
+            return (PaneArea::Whole(self.rect), None);
+        }
+        // a zoomed tab shows one pane, so there is no seam left to sit on
+        if let Some((left, gutter, right)) = (!zoomed)
+            .then(|| layout.gutter_areas(self.rect, reserved))
+            .flatten()
+        {
+            return (PaneArea::Gutter { left, right }, Some(gutter));
+        }
+        self.edge_area()
+    }
+
+    /// panes beside a reservation held at the left edge, as when there is no seam to sit on.
+    pub(crate) fn edge_area(self) -> (PaneArea, Option<Rect>) {
+        let reserved = self.reserved();
+        (
+            PaneArea::Whole(self.unreserved()),
+            (reserved > 0).then_some(Rect {
+                width: reserved,
+                ..self.rect
+            }),
+        )
+    }
+
+    pub(crate) fn tab_area(self, tab: &crate::workspace::Tab) -> (PaneArea, Option<Rect>) {
+        self.layout_area(&tab.layout, tab.zoomed)
+    }
+}
+
 pub(crate) struct TabSurfaceLayout {
     pub(crate) target: Option<TabSurfaceTarget>,
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
+    /// the box the panes tile in, which popups center on
+    pub(crate) pane_bounds: Rect,
+    /// columns of the surface left free for the client
+    pub(crate) reserved: Option<Rect>,
 }
 
 #[derive(Clone, Copy)]
@@ -28,7 +108,7 @@ pub(crate) struct TabSurfaceView<'a> {
 pub(crate) fn compute_tab_surface(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
+    area: impl Into<SurfaceArea>,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> TabSurfaceLayout {
@@ -53,22 +133,27 @@ pub(crate) fn compute_tab_surface_for(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     target: Option<TabSurfaceTarget>,
-    area: Rect,
+    area: impl Into<SurfaceArea>,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> TabSurfaceLayout {
+    let area = area.into();
     let tab = target.and_then(|target| {
         app.workspaces
             .get(target.workspace_index)?
             .tabs
             .get(target.tab_index)
     });
+    let (pane_area, reserved) = match tab {
+        Some(tab) => area.tab_area(tab),
+        None => area.edge_area(),
+    };
     let split_borders = tab
         .map(|tab| {
             if tab.zoomed {
                 Vec::new()
             } else {
-                tab.layout.splits(area)
+                tab.layout.splits_in(pane_area)
             }
         })
         .unwrap_or_default();
@@ -78,7 +163,7 @@ pub(crate) fn compute_tab_surface_for(
             terminal_runtimes,
             target.workspace_index,
             target.tab_index,
-            area,
+            pane_area,
             resize_panes,
             cell_size,
         )
@@ -88,15 +173,18 @@ pub(crate) fn compute_tab_surface_for(
         target,
         pane_infos,
         split_borders,
+        pane_bounds: pane_area.bounds(),
+        reserved,
     }
 }
 
+/// size a tab's runtimes for its own shape, so a background tab is already right when shown.
 pub(crate) fn resize_tab_surface(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     workspace_index: usize,
     tab_index: usize,
-    area: Rect,
+    area: impl Into<SurfaceArea>,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     let Some(tab) = app
@@ -111,7 +199,7 @@ pub(crate) fn resize_tab_surface(
         terminal_runtimes,
         workspace_index,
         tab,
-        area,
+        area.into().tab_area(tab).0,
         cell_size,
     );
 }
@@ -284,5 +372,146 @@ mod tests {
             .iter()
             .any(|(_, symbol, link)| { symbol == "L" && link == uri }));
         assert!(tab_surface_cursor(&app, &TerminalRuntimeRegistry::new(), surface_view,).is_some());
+    }
+
+    fn app_with(workspace: Workspace) -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app
+    }
+
+    fn surface_for(app: &AppState, tab_index: usize, area: SurfaceArea) -> TabSurfaceLayout {
+        compute_tab_surface_for(
+            app,
+            &TerminalRuntimeRegistry::new(),
+            Some(TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index,
+            }),
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        )
+    }
+
+    const SURFACE: Rect = Rect::new(0, 0, 106, 19);
+
+    #[test]
+    fn a_two_column_tab_tiles_either_side_of_the_reserved_seam() {
+        let mut workspace = Workspace::test_new("one");
+        workspace.test_split(Direction::Horizontal);
+        let app = app_with(workspace);
+
+        let surface = surface_for(&app, 0, SurfaceArea::new(SURFACE, 26));
+
+        assert_eq!(surface.reserved, Some(Rect::new(40, 0, 26, 19)));
+        let rects: Vec<_> = surface.pane_infos.iter().map(|info| info.rect).collect();
+        assert_eq!(
+            rects,
+            vec![Rect::new(0, 0, 40, 19), Rect::new(66, 0, 40, 19)]
+        );
+        // the seam is the client's, so the root split offers no drag handle
+        assert!(surface.split_borders.is_empty());
+        assert_eq!(surface.pane_bounds, SURFACE);
+    }
+
+    #[test]
+    fn a_tab_without_a_seam_keeps_the_reservation_at_the_edge() {
+        let edge = Some(Rect::new(0, 0, 26, 19));
+        let tiled_right_of_it = |surface: &TabSurfaceLayout| {
+            surface
+                .pane_infos
+                .iter()
+                .all(|info| info.rect.x >= 26 && info.rect.right() <= 106)
+        };
+
+        let single = app_with(Workspace::test_new("single"));
+        let surface = surface_for(&single, 0, SurfaceArea::new(SURFACE, 26));
+        assert_eq!(surface.reserved, edge);
+        assert_eq!(surface.pane_infos[0].rect, Rect::new(26, 0, 80, 19));
+
+        let mut stacked = Workspace::test_new("stacked");
+        stacked.test_split(Direction::Vertical);
+        let stacked = app_with(stacked);
+        let surface = surface_for(&stacked, 0, SurfaceArea::new(SURFACE, 26));
+        assert_eq!(surface.reserved, edge);
+        assert!(tiled_right_of_it(&surface));
+
+        let mut zoomed = Workspace::test_new("zoomed");
+        zoomed.test_split(Direction::Horizontal);
+        zoomed.tabs[0].zoomed = true;
+        let zoomed = app_with(zoomed);
+        let surface = surface_for(&zoomed, 0, SurfaceArea::new(SURFACE, 26));
+        assert_eq!(surface.reserved, edge);
+        assert_eq!(surface.pane_infos[0].rect, Rect::new(26, 0, 80, 19));
+
+        // too narrow to keep 20 columns a side once the sidebar is taken out
+        let mut narrow = Workspace::test_new("narrow");
+        narrow.test_split(Direction::Horizontal);
+        let narrow = app_with(narrow);
+        let surface = surface_for(&narrow, 0, SurfaceArea::new(Rect::new(0, 0, 60, 19), 26));
+        assert_eq!(surface.reserved, Some(Rect::new(0, 0, 26, 19)));
+        assert!(surface.pane_infos.iter().all(|info| info.rect.x >= 26));
+    }
+
+    #[test]
+    fn no_reservation_leaves_the_surface_whole() {
+        let mut workspace = Workspace::test_new("one");
+        workspace.test_split(Direction::Horizontal);
+        let app = app_with(workspace);
+
+        let surface = surface_for(&app, 0, SURFACE.into());
+
+        assert_eq!(surface.reserved, None);
+        assert_eq!(surface.pane_infos[0].rect.x, 0);
+        assert_eq!(surface.split_borders.len(), 1);
+    }
+
+    // a background tab sized for a shape it will not show is resized the moment it is shown
+    #[tokio::test]
+    async fn background_tabs_are_sized_for_their_own_shape() {
+        let mut workspace = Workspace::test_new("mixed");
+        let columns_tab = 0;
+        workspace.test_split(Direction::Horizontal);
+        let single_tab = workspace.test_add_tab(Some("single"));
+        let mut runtimes = Vec::new();
+        for tab_index in [columns_tab, single_tab] {
+            for pane in workspace.tabs[tab_index].layout.pane_ids() {
+                workspace.tabs[tab_index].runtimes.insert(
+                    pane,
+                    crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b""),
+                );
+                runtimes.push((tab_index, pane));
+            }
+        }
+        let app = app_with(workspace);
+        let area = SurfaceArea::new(SURFACE, 26);
+        for tab_index in [columns_tab, single_tab] {
+            resize_tab_surface(
+                &app,
+                &TerminalRuntimeRegistry::new(),
+                0,
+                tab_index,
+                area,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+        }
+
+        for (tab_index, pane) in runtimes {
+            let resized = app.workspaces[0].tabs[tab_index].runtimes[&pane].current_size();
+            let shown = surface_for(&app, tab_index, area)
+                .pane_infos
+                .into_iter()
+                .find(|info| info.id == pane)
+                .expect("pane laid out");
+            // the hidden size is exactly the one the tab gets once it is the one on screen
+            assert_eq!(
+                resized,
+                (shown.inner_rect.height, shown.inner_rect.width),
+                "tab {tab_index}"
+            );
+        }
     }
 }

@@ -746,11 +746,24 @@ impl HeadlessServer {
     }
 
     fn sync_runtime_view_geometry(&mut self) {
+        let area = self.effective_surface_area();
         crate::ui::compute_view_without_resizing_panes(
             &mut self.app.state,
             &self.app.terminal_runtimes,
-            Rect::new(0, 0, self.effective_size.0, self.effective_size.1),
+            area,
         );
+    }
+
+    /// the foreground surface, with the columns its client keeps for its own chrome.
+    fn effective_surface_area(&self) -> crate::ui::SurfaceArea {
+        let reserved = self
+            .foreground_client_id
+            .and_then(|client_id| self.clients.get(&client_id))
+            .map_or(0, |client| client.shell_reserved_columns);
+        crate::ui::SurfaceArea::new(
+            Rect::new(0, 0, self.effective_size.0, self.effective_size.1),
+            reserved,
+        )
     }
 
     fn sync_foreground_client_state(&mut self) {
@@ -1857,6 +1870,7 @@ impl HeadlessServer {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                surface_reserved_columns,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -1899,6 +1913,7 @@ impl HeadlessServer {
                 connection.shell_uses_endpoint_keybindings = endpoint_keybindings;
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_surface_active = surface_active;
+                connection.shell_reserved_columns = surface_reserved_columns;
                 connection.render_state.enable_surface_reuse(surface_reuse);
                 connection.render_state.enable_surface_delta(surface_delta);
                 connection
@@ -2177,6 +2192,7 @@ impl HeadlessServer {
                 cell_width_px,
                 cell_height_px,
                 pixel_mouse,
+                reserved_columns,
             } => {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
@@ -2185,6 +2201,7 @@ impl HeadlessServer {
                     return false;
                 }
                 client.terminal_size = (surface_cols, surface_rows);
+                client.shell_reserved_columns = reserved_columns;
                 let observed = crate::kitty_graphics::HostCellSize {
                     width_px: cell_width_px,
                     height_px: cell_height_px,
@@ -2984,8 +3001,9 @@ impl HeadlessServer {
                 .get(&client_id)
                 .is_some_and(|client| matches!(client.mode, ClientConnectionMode::ClientShell))
         }) {
-            self.app.state.view.terminal_area =
-                Rect::new(0, 0, self.effective_size.0, self.effective_size.1);
+            let area = self.effective_surface_area();
+            self.app.state.view.terminal_area = area.rect;
+            self.app.state.view.reserved_columns = area.reserved_columns;
         }
         let mut response = if matches!(
             &msg.request.method,

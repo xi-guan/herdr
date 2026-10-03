@@ -11,7 +11,14 @@ impl ClientShellState {
             self.config.sidebar_max_width,
         )
         .unwrap_or((18, 36));
-        let width = column.saturating_add(1).clamp(min, max);
+        // a sidebar on a seam does not start at the edge, so its width is measured from where it does
+        let origin = self
+            .last_composed_size
+            .map_or(0, |(cols, rows)| self.layout(cols, rows).sidebar.x);
+        let width = column
+            .saturating_sub(origin)
+            .saturating_add(1)
+            .clamp(min, max);
         if self.sidebar_width != width {
             self.sidebar_width = width;
             self.sidebar_width_manual = true;

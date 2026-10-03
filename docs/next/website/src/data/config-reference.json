@@ -900,6 +900,16 @@
           ]
         },
         {
+          "key": "ui.sidebar_position",
+          "type": "enum",
+          "default": "\"left\"",
+          "description": "Place the expanded sidebar at the left edge, or on the seam of a tab split into two columns wide enough to hold it. Center falls back to the left edge for zoomed, single-pane, or stacked tabs.",
+          "values": [
+            "left",
+            "center"
+          ]
+        },
+        {
           "key": "ui.mobile_width_threshold",
           "type": "integer",
           "default": "64",

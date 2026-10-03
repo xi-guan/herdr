@@ -79,12 +79,47 @@ pub(super) fn client_shell_resize_message(
     cell_height_px: u32,
     pixel_mouse: bool,
 ) -> ClientMessage {
-    ClientMessage::ClientShellResize {
+    client_shell_resize_message_for(
+        shell,
+        shell.active_endpoint_id(),
+        cols,
+        rows,
         cell_width_px,
         cell_height_px,
-        surface_size: shell.surface_size(cols, rows),
         pixel_mouse,
+    )
+}
+
+/// the resize for one endpoint; a reservation rides a named control so size and columns land together.
+pub(super) fn client_shell_resize_message_for(
+    shell: &shell::ClientShellState,
+    endpoint_id: &endpoint::ClientEndpointId,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    pixel_mouse: bool,
+) -> ClientMessage {
+    let surface_size = shell.surface_size_for(endpoint_id, cols, rows);
+    let legacy = ClientMessage::ClientShellResize {
+        cell_width_px,
+        cell_height_px,
+        surface_size,
+        pixel_mouse,
+    };
+    let reserved_columns = shell.surface_reserved_columns_for(endpoint_id, cols);
+    if reserved_columns == 0 {
+        return legacy;
     }
+    crate::protocol::endpoint::EndpointSurfaceResize {
+        cell_width_px,
+        cell_height_px,
+        surface_size,
+        pixel_mouse,
+        reserved_columns,
+    }
+    .message()
+    .unwrap_or(legacy)
 }
 
 pub(super) fn sync_client_shell_keyboard_report_all(
@@ -289,8 +324,10 @@ pub(super) fn begin_endpoint_activation(
     let Some(shell) = state.shell.as_ref() else {
         return Ok(());
     };
-    let resize = client_shell_resize_message(
+    // sized for the endpoint being activated, which may not honour a reservation
+    let resize = client_shell_resize_message_for(
         shell,
+        &endpoint_id,
         state.reported_size.0,
         state.reported_size.1,
         state.reported_cell_size.0,

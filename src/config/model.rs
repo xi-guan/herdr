@@ -142,6 +142,15 @@ pub enum SidebarCollapsedModeConfig {
     Hidden,
 }
 
+/// which column the sidebar sits in; center only holds while the visible tab has a wide left/right split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarPositionConfig {
+    #[default]
+    Left,
+    Center,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -952,6 +961,8 @@ pub struct UiConfig {
     pub sidebar_start_collapsed: bool,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
+    /// Which column the sidebar sits in. Saved values are "left" or "center". Default: "left".
+    pub sidebar_position: SidebarPositionConfig,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -1207,6 +1218,7 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
+            sidebar_position: SidebarPositionConfig::default(),
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             copy_on_select: true,
@@ -1725,6 +1737,17 @@ sidebar_collapsed_mode = "hidden"
             config.ui.sidebar_collapsed_mode,
             SidebarCollapsedModeConfig::Hidden
         );
+    }
+
+    #[test]
+    fn sidebar_position_defaults_left_and_parses_center() {
+        assert_eq!(
+            Config::default().ui.sidebar_position,
+            SidebarPositionConfig::Left
+        );
+
+        let config: Config = toml::from_str("[ui]\nsidebar_position = \"center\"\n").unwrap();
+        assert_eq!(config.ui.sidebar_position, SidebarPositionConfig::Center);
     }
 
     #[test]

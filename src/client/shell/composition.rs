@@ -111,7 +111,7 @@ impl ClientShellState {
             )
         });
         let message_area = if layout.sidebar.width > 0 {
-            layout.pane_surface
+            layout.terminal
         } else {
             Rect::new(0, 0, cols, 1)
         };
@@ -313,7 +313,7 @@ impl ClientShellState {
         {
             layout.tab_bar
         } else {
-            layout.pane_surface
+            layout.terminal
         };
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
@@ -343,7 +343,12 @@ impl ClientShellState {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
-        blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        blit_pane_surface(
+            &mut frame,
+            &surface.frame,
+            layout.pane_surface,
+            layout.reserved,
+        );
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let has_selection = self
@@ -537,7 +542,7 @@ impl ClientShellState {
             let mut composed = frame.to_ratatui_buffer()?;
             let base_offset = u16::from(has_config_diagnostic);
             let feedback_area = if layout.mobile_header.is_empty() {
-                layout.pane_surface
+                layout.terminal
             } else {
                 Rect::new(0, 0, cols, rows)
             };
@@ -563,7 +568,7 @@ impl ClientShellState {
             let width = popup.width.map(client_popup_size);
             let height = popup.height.map(client_popup_size);
             if let Some(geometry) =
-                crate::popup_size::resolve_popup_geometry(width, height, layout.pane_surface)
+                crate::popup_size::resolve_popup_geometry(width, height, layout.terminal)
             {
                 occlusion.start_popup(geometry.outer);
                 let mut composed = frame.to_ratatui_buffer()?;
@@ -579,7 +584,7 @@ impl ClientShellState {
                 );
                 ratatui::widgets::Widget::render(block, geometry.outer, &mut composed);
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
-                blit_pane_surface(&mut frame, &popup.frame, geometry.inner);
+                blit_pane_surface(&mut frame, &popup.frame, geometry.inner, Rect::default());
                 self.hits.popup = Some(PaneHit {
                     rect: geometry.outer,
                     inner_rect: geometry.inner,

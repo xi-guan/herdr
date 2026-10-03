@@ -65,6 +65,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         commands: Vec::new(),
         claude_usage: None,
         hidden_workspaces: Vec::new(),
+        surface_reservation: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn surface_with_popup() -> PaneSurfaceFrame {
 }
 
 mod agents_worktrees_notifications;
+mod centered_sidebar;
 mod chrome_context;
 mod claude_usage;
 mod close_tab;
