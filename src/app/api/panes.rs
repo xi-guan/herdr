@@ -1,15 +1,15 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCopyMotion,
-    PaneCopyMotionParams, PaneCopySearchDirection, PaneCopySearchParams, PaneCurrentParams,
-    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
+    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneContentRevisionsParams,
+    PaneCopyMotion, PaneCopyMotionParams, PaneCopySearchDirection, PaneCopySearchParams,
+    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
-    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
-    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneNeighborParams, PaneNeighborResult, PaneOutputChangedEvent, PaneProcessInfo,
+    PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
@@ -146,6 +146,49 @@ impl App {
             Ok(panes) => encode_success(id, ResponseResult::PaneList { panes }),
             Err((code, message)) => encode_error(id, &code, message),
         }
+    }
+
+    pub(super) fn handle_pane_content_revisions(
+        &self,
+        id: String,
+        params: PaneContentRevisionsParams,
+    ) -> String {
+        // ids and one counter per pane: no cwd, process or token lookups on this per-tick poll
+        let revision = |ws_idx: usize, pane_id: PaneId| {
+            Some(PaneOutputChangedEvent {
+                pane_id: self.public_pane_id(ws_idx, pane_id)?,
+                workspace_id: self.public_workspace_id(ws_idx),
+                revision: self
+                    .state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+                    .map_or(0, |runtime| runtime.settled_content_revision()),
+            })
+        };
+        let panes: Vec<_> = match params.pane_id.as_deref() {
+            Some(target) => {
+                let Some(pane) = self
+                    .parse_pane_id(target)
+                    .and_then(|(ws_idx, pane_id)| revision(ws_idx, pane_id))
+                else {
+                    return pane_not_found(id, target);
+                };
+                vec![pane]
+            }
+            None => self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .flat_map(|(ws_idx, ws)| {
+                    ws.tabs
+                        .iter()
+                        .flat_map(|tab| tab.layout.pane_ids())
+                        .map(move |pane_id| (ws_idx, pane_id))
+                })
+                .filter_map(|(ws_idx, pane_id)| revision(ws_idx, pane_id))
+                .collect(),
+        };
+        serde_json::json!({ "id": id, "result": { "panes": panes } }).to_string()
     }
 
     pub(super) fn handle_pane_current(&mut self, id: String, params: PaneCurrentParams) -> String {
@@ -2508,6 +2551,48 @@ mod tests {
         assert_eq!(scroll.offset_from_bottom, 3);
         assert!(scroll.max_offset_from_bottom >= scroll.offset_from_bottom);
         assert_eq!(scroll.viewport_rows, 5);
+    }
+
+    #[tokio::test]
+    async fn api_pane_content_revisions_report_each_panes_settled_revision() {
+        let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"more output\n");
+        let settled = runtime.settled_content_revision();
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let revisions = |app: &App, pane_id: Option<&str>| -> serde_json::Value {
+            let response = app.handle_pane_content_revisions(
+                "req".into(),
+                PaneContentRevisionsParams {
+                    pane_id: pane_id.map(str::to_string),
+                },
+            );
+            serde_json::from_str(&response).unwrap()
+        };
+
+        assert_eq!(
+            revisions(&app, None)["result"]["panes"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(settled > 0 && settled.is_multiple_of(2));
+        assert_eq!(
+            revisions(&app, Some(&public_pane_id))["result"]["panes"],
+            serde_json::json!([{
+                "pane_id": public_pane_id,
+                "workspace_id": app.public_workspace_id(0),
+                "revision": settled,
+            }])
+        );
+        assert_eq!(
+            revisions(&app, Some("w9:p9"))["error"]["code"],
+            "pane_not_found"
+        );
     }
 
     #[tokio::test]

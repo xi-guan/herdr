@@ -179,6 +179,10 @@ pub enum Method {
     PaneCopySearch(PaneCopySearchParams),
     #[serde(rename = "pane.list")]
     PaneList(PaneListParams),
+    // never on the wire: a socket client cannot name it and the schema omits it
+    #[serde(skip)]
+    #[schemars(skip)]
+    PaneContentRevisions(PaneContentRevisionsParams),
     #[serde(rename = "pane.current")]
     PaneCurrent(PaneCurrentParams),
     #[serde(rename = "pane.get")]

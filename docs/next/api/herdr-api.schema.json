@@ -4227,7 +4227,11 @@
                   ]
                 },
                 "pane_id": {
-                  "type": "string"
+                  "description": "omitted = every pane, served straight from the event hub",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "type": {
                   "const": "pane.agent_status_changed",
@@ -4235,8 +4239,26 @@
                 }
               },
               "required": [
-                "type",
-                "pane_id"
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "description": "omitted = every pane",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "pane.output_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
               ],
               "type": "object"
             },
@@ -6392,6 +6414,28 @@
           ],
           "type": "object"
         },
+        "PaneOutputChangedEvent": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "description": "the pane's `content_revision` at emit time; later events carry larger values",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "revision"
+          ],
+          "type": "object"
+        },
         "PaneOutputMatchedEvent": {
           "properties": {
             "matched_line": {
@@ -6522,6 +6566,9 @@
             },
             {
               "$ref": "#/schemas/subscription_event/$defs/PaneScrollChangedEvent"
+            },
+            {
+              "$ref": "#/schemas/subscription_event/$defs/PaneOutputChangedEvent"
             }
           ]
         },
@@ -6529,7 +6576,8 @@
           "enum": [
             "pane.output_matched",
             "pane.agent_status_changed",
-            "pane.scroll_changed"
+            "pane.scroll_changed",
+            "pane.output_changed"
           ],
           "type": "string"
         }

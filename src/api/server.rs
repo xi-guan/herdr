@@ -631,6 +631,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneCopyMotion(_) => "pane.copy_motion",
         Method::PaneCopySearch(_) => "pane.copy_search",
         Method::PaneList(_) => "pane.list",
+        Method::PaneContentRevisions(_) => "pane.content_revisions",
         Method::PaneCurrent(_) => "pane.current",
         Method::PaneGet(_) => "pane.get",
         Method::PaneFocus(_) => "pane.focus",

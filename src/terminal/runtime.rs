@@ -597,6 +597,11 @@ impl TerminalRuntime {
     pub(crate) fn content_seq(&self) -> u64 {
         self.0.content_seq()
     }
+
+    // odd means a write is mid-flight; report the revision it started from
+    pub(crate) fn settled_content_revision(&self) -> u64 {
+        self.content_seq() & !1
+    }
 }
 
 #[cfg(test)]
