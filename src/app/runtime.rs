@@ -220,6 +220,8 @@ impl App {
         [
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            // the held border colour is repainted the moment it runs out, not on the next event
+            self.state.next_acknowledged_hold_expiry(),
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
             include_git_refresh

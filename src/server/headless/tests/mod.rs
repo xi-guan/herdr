@@ -3650,6 +3650,93 @@ async fn client_shell_mouse_motion_delivers_without_render_when_foreground() {
 }
 
 #[tokio::test]
+async fn typing_into_a_pane_lets_go_of_its_held_border_colour() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1003h\x1b[?1006h");
+    let pane_id = server.app.session_snapshot().focused_pane_id.unwrap();
+    let root_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal_id = server.app.state.workspaces[0]
+        .terminal_id(root_pane)
+        .unwrap()
+        .clone();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    server.foreground_client_id = Some(11);
+    assert!(server.claim_unowned_shell_tab_geometry(11, false));
+    assert!(server
+        .app
+        .state
+        .hold_acknowledged(vec![terminal_id.clone()]));
+    let input = |events| ServerEvent::ClientShellPaneInput {
+        client_id: 11,
+        pane_id: pane_id.clone(),
+        events,
+    };
+
+    // pointing at the pane is not an answer to it
+    let render_impact = server.handle_server_event_with_render_impact(input(vec![
+        crate::protocol::ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::Moved,
+            position: crate::protocol::ClientMousePosition::Cell { column: 2, row: 1 },
+            geometry: None,
+            modifiers: 0,
+            lines: 0,
+        },
+    ]));
+    assert_eq!(render_impact, RenderImpact::None);
+    assert!(input_rx.try_recv().is_ok(), "motion must reach the PTY");
+    assert!(server.app.state.acknowledged_at.contains_key(&terminal_id));
+
+    let render_impact = server.handle_server_event_with_render_impact(input(vec![
+        crate::protocol::ClientPaneInputEvent::TextCommit("x".to_owned()),
+    ]));
+    assert_eq!(
+        render_impact,
+        RenderImpact::Full,
+        "the border has to be repainted without its held colour"
+    );
+    assert_eq!(
+        input_rx.try_recv().expect("text must reach the PTY"),
+        Bytes::from_static(b"x")
+    );
+    assert!(server.app.state.next_acknowledged_hold_expiry().is_none());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn a_held_border_colour_runs_out_on_the_scheduled_pass() {
+    let mut server = test_headless_server();
+    let held_at = std::time::Instant::now();
+    let terminal_id = crate::terminal::TerminalId::alloc();
+    server
+        .app
+        .state
+        .acknowledged_at
+        .insert(terminal_id.clone(), held_at);
+
+    server.handle_scheduled_tasks_headless(held_at, false);
+    assert!(server.app.state.acknowledged_at.contains_key(&terminal_id));
+
+    assert!(
+        server.handle_scheduled_tasks_headless(
+            held_at + crate::app::AppState::ACKNOWLEDGED_HOLD,
+            false
+        ),
+        "the expiry has to request the repaint that drops the colour"
+    );
+    assert!(server.app.state.acknowledged_at.is_empty());
+}
+
+#[tokio::test]
 async fn client_shell_mouse_motion_promotes_and_requests_render() {
     let mut server = test_headless_server();
     let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1003h\x1b[?1006h");

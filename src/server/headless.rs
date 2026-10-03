@@ -2383,10 +2383,19 @@ impl HeadlessServer {
                     return foreground_changed | geometry_changed;
                 };
                 let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_pane_input_events(runtime, &events) {
+                let applied = apply_client_pane_input_events(runtime, &events);
+                if let Err(err) = &applied {
                     warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
                 }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
+                let scrolled = runtime.scroll_metrics() != scroll_before;
+                // typing is the acknowledgement that counts, so a held border colour lets go
+                let released = applied.is_ok()
+                    && client_pane_input_types(&events)
+                    && self
+                        .app
+                        .state
+                        .release_acknowledged_hold(workspace_index, runtime_pane_id);
+                foreground_changed | geometry_changed || scrolled || released
             }
             ServerEvent::ClientShellPopupInput {
                 client_id,
@@ -3212,6 +3221,8 @@ impl HeadlessServer {
             changed = true;
         }
 
+        changed |= self.app.state.expire_acknowledged_holds(now);
+
         if self
             .app
             .state
@@ -3300,6 +3311,17 @@ fn client_pane_input_has_interaction(events: &[protocol::ClientPaneInputEvent]) 
     events
         .iter()
         .any(|event| !client_pane_input_releases_press(event))
+}
+
+fn client_pane_input_types(events: &[protocol::ClientPaneInputEvent]) -> bool {
+    events.iter().any(|event| match event {
+        protocol::ClientPaneInputEvent::Key { kind, .. } => {
+            !matches!(kind, protocol::ClientKeyKind::Release)
+        }
+        protocol::ClientPaneInputEvent::TextCommit(_)
+        | protocol::ClientPaneInputEvent::Paste(_) => true,
+        protocol::ClientPaneInputEvent::Mouse { .. } => false,
+    })
 }
 
 impl Drop for HeadlessServer {

@@ -28,6 +28,20 @@ fn is_completion_transition(change: &EffectiveStateChange) -> bool {
     is_background_completion_transition(change.previous_state, change.state)
 }
 
+/// the terminals a switch to this tab is about to mark seen.
+fn unseen_terminal_ids(
+    ws: &crate::workspace::Workspace,
+    tab_idx: usize,
+) -> Vec<crate::terminal::TerminalId> {
+    ws.tabs.get(tab_idx).map_or_else(Vec::new, |tab| {
+        tab.panes
+            .values()
+            .filter(|pane| !pane.seen)
+            .map(|pane| pane.attached_terminal_id.clone())
+            .collect()
+    })
+}
+
 fn public_tab_id_for_index(ws: &crate::workspace::Workspace, tab_idx: usize) -> Option<String> {
     let tab_number = ws.public_tab_number(tab_idx)?;
     Some(crate::workspace::public_tab_id_for_number(
@@ -392,13 +406,16 @@ impl AppState {
             let workspace_id = self.workspaces[idx].id.clone();
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
+            let mut acknowledged = Vec::new();
             if let Some(ws) = self.workspaces.get_mut(idx) {
                 let active_tab = ws.active_tab;
+                acknowledged = unseen_terminal_ids(ws, active_tab);
                 ws.switch_tab(active_tab);
                 let tab_id =
                     public_tab_id_for_index(ws, active_tab).unwrap_or_else(|| workspace_id.clone());
                 crate::logging::tab_focused(&workspace_id, &tab_id);
             }
+            self.hold_acknowledged(acknowledged);
             self.record_pane_focus_after_navigation(previous_focus);
         }
     }
@@ -424,12 +441,15 @@ impl AppState {
             crate::logging::workspace_focused(&workspace_id);
         }
         self.mark_session_dirty();
+        let mut acknowledged = Vec::new();
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            acknowledged = unseen_terminal_ids(ws, tab_idx);
             ws.switch_tab(tab_idx);
             let tab_id =
                 public_tab_id_for_index(ws, tab_idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
         }
+        self.hold_acknowledged(acknowledged);
         self.record_pane_focus_after_navigation(previous_focus);
         true
     }
@@ -462,14 +482,43 @@ impl AppState {
             return false;
         };
 
-        let mut changed = false;
-        for pane in tab.panes.values_mut() {
-            if !pane.seen {
+        let acknowledged = tab
+            .panes
+            .values_mut()
+            .filter(|pane| !pane.seen)
+            .map(|pane| {
                 pane.seen = true;
-                changed = true;
-            }
+                pane.attached_terminal_id.clone()
+            })
+            .collect::<Vec<_>>();
+        self.hold_acknowledged(acknowledged)
+    }
+
+    /// keeps the colour these terminals wore when reached, or the mark vanishes with the arrival.
+    pub(crate) fn hold_acknowledged(
+        &mut self,
+        terminal_ids: Vec<crate::terminal::TerminalId>,
+    ) -> bool {
+        if terminal_ids.is_empty() {
+            return false;
         }
-        changed
+        let now = Instant::now();
+        for terminal_id in terminal_ids {
+            self.acknowledged_at.insert(terminal_id, now);
+        }
+        true
+    }
+
+    /// typing into the pane is the acknowledgement that counts, so the hold ends then.
+    pub(crate) fn release_acknowledged_hold(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(terminal_id) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+        else {
+            return false;
+        };
+        self.acknowledged_at.remove(terminal_id).is_some()
     }
 
     pub fn move_workspace(&mut self, source_idx: usize, insert_idx: usize) -> bool {
@@ -1826,12 +1875,21 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
+        let mut watched_completion = None;
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if !suppress_completion && is_completion_transition(change) {
             pane.seen = suppress_active_tab_notifications;
+            if pane.seen {
+                watched_completion = Some(pane.attached_terminal_id.clone());
+            }
         }
         let seen = pane.seen;
+
+        // a completion you were watching holds its colour too, or the border skips straight to rest
+        if let Some(terminal_id) = watched_completion {
+            self.hold_acknowledged(vec![terminal_id]);
+        }
 
         if !suppress_completion {
             if let Some(delivery) =
@@ -3034,6 +3092,40 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Idle);
         let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
         assert!(pane.seen);
+    }
+
+    #[test]
+    fn a_watched_completion_still_holds_its_colour() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let terminal_id_of = |state: &AppState, ws_idx: usize| {
+            let pane_id = *state.workspaces[ws_idx].panes.keys().next().unwrap();
+            let terminal_id = state.workspaces[ws_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            (pane_id, terminal_id)
+        };
+        for ws_idx in [0, 1] {
+            let (pane_id, terminal_id) = terminal_id_of(&state, ws_idx);
+            state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Pi),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: std::time::Instant::now(),
+            });
+        }
+
+        let (watched_pane, watched) = terminal_id_of(&state, 0);
+        assert!(state.workspaces[0].panes[&watched_pane].seen);
+        assert!(state.acknowledged_at.contains_key(&watched));
+        // one finished out of sight is still unseen, so nothing has been reached yet
+        let (_, unwatched) = terminal_id_of(&state, 1);
+        assert!(!state.acknowledged_at.contains_key(&unwatched));
     }
 
     #[test]

@@ -12,7 +12,7 @@ mod api;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
-pub(crate) use api_helpers::limit_snapshot_lines;
+pub(crate) use api_helpers::{limit_snapshot_lines, pane_agent_status};
 mod creation;
 mod custom_commands;
 mod git_refresh;
@@ -484,6 +484,7 @@ impl App {
             config_diagnostic,
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),
+            acknowledged_at: std::collections::HashMap::new(),
             outer_terminal_focus: None,
             prefix_keys,
             headless_size: config.headless_size(),
@@ -3139,6 +3140,25 @@ mod tests {
         assert_eq!(
             app.next_headless_loop_deadline_with_git_refresh(now, false, true),
             None
+        );
+    }
+
+    #[test]
+    fn headless_next_loop_deadline_wakes_when_a_held_border_colour_runs_out() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_auto_update_check = None;
+        app.session_save_deadline = None;
+        app.state.workspaces.clear();
+        app.state
+            .acknowledged_at
+            .insert(crate::terminal::TerminalId::alloc(), now);
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            Some(now + AppState::ACKNOWLEDGED_HOLD)
         );
     }
 
