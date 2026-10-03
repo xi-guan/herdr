@@ -64,7 +64,7 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::OpenNotificationTarget {
-                    self.focus_visible_notification(outcome);
+                    self.walk_to_next_waiting_agent(outcome);
                     return;
                 }
                 if action == crate::input::KeybindAction::ReloadConfig {

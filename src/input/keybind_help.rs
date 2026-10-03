@@ -76,7 +76,7 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.reload_config), "reload config"),
                 entry(
                     binding_label(&keybinds.open_notification_target),
-                    "open notification target",
+                    "go to the next agent waiting on you",
                 ),
             ],
         ),

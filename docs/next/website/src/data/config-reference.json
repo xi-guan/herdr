@@ -599,7 +599,7 @@
           "key": "keys.open_notification_target",
           "type": "keybinding",
           "default": "\"prefix+o\"",
-          "description": "Focus the currently visible notification target."
+          "description": "Go to an agent waiting on you (blocked, or finished while you were away); press again for the next. The walk wraps round and covers the local machine."
         },
         {
           "key": "keys.previous_workspace",
