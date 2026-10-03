@@ -155,7 +155,8 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        // renaming a tab to its own ordinal is the only way back to an auto-named tab
+        tab.custom_name = (params.label != (tab_idx + 1).to_string()).then(|| params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
@@ -373,6 +374,43 @@ mod tests {
             } if closed_workspace_id == &workspace_id
                 && workspace.workspace_id == workspace_id
         ));
+    }
+
+    // a tab named after its own ordinal reads as the auto name, so it must behave like one
+    #[test]
+    fn api_tab_rename_to_its_own_ordinal_clears_the_custom_name() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id: tab_id.clone(),
+                label: "logs".into(),
+            },
+        );
+        assert!(!app.state.workspaces[0].tabs[0].is_auto_named());
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: "1".into(),
+            },
+        );
+
+        assert!(app.state.workspaces[0].tabs[0].is_auto_named());
     }
 
     #[test]
