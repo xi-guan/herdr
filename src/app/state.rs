@@ -778,6 +778,37 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// a space put away rather than closed: its panes and processes are gone, only what reopens it stays
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenSpace {
+    /// the workspace id it carried while it was open
+    pub id: String,
+    /// its custom name; None restores the auto name from `cwd`
+    pub label: Option<String>,
+    pub cwd: std::path::PathBuf,
+    // resolved once, so every client frame that projects it skips the git root walk
+    resolved_label: String,
+}
+
+impl HiddenSpace {
+    pub fn new(id: String, label: Option<String>, cwd: std::path::PathBuf) -> Self {
+        let resolved_label = label
+            .clone()
+            .unwrap_or_else(|| crate::workspace::derive_label_from_cwd(&cwd));
+        Self {
+            id,
+            label,
+            cwd,
+            resolved_label,
+        }
+    }
+
+    /// the label the space carried while it was open
+    pub fn display_label(&self) -> &str {
+        &self.resolved_label
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -803,6 +834,8 @@ pub struct AppState {
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
     pub worktree_directory: std::path::PathBuf,
+    /// spaces put away, newest first; session data that comes back with the session
+    pub hidden_spaces: Vec<HiddenSpace>,
     /// Latest endpoint-owned release notes, cached outside render paths.
     pub latest_release_notes: Option<crate::release_notes::ReleaseNotes>,
     pub product_announcement: Option<ProductAnnouncementState>,
@@ -902,6 +935,28 @@ impl AppState {
 
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    pub(crate) fn hidden_spaces_snapshot(&self) -> Vec<crate::persist::HiddenSpaceSnapshot> {
+        self.hidden_spaces
+            .iter()
+            .map(|hidden| crate::persist::HiddenSpaceSnapshot {
+                id: hidden.id.clone(),
+                label: hidden.label.clone(),
+                cwd: hidden.cwd.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn hidden_spaces_from_snapshot(
+        snapshot: &[crate::persist::HiddenSpaceSnapshot],
+    ) -> Vec<HiddenSpace> {
+        snapshot
+            .iter()
+            .map(|hidden| {
+                HiddenSpace::new(hidden.id.clone(), hidden.label.clone(), hidden.cwd.clone())
+            })
+            .collect()
     }
 
     /// when the earliest hold runs out, so the loop repaints the border the moment it does.
@@ -1072,6 +1127,7 @@ impl AppState {
             should_quit: false,
             request_client_config_reload: false,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
+            hidden_spaces: Vec::new(),
             latest_release_notes: None,
             product_announcement: None,
             view: ViewState {
@@ -1180,6 +1236,19 @@ impl AppState {
     }
 
     pub fn assert_invariants_for_test(&self) {
+        let mut hidden_ids = std::collections::HashSet::new();
+        for hidden in &self.hidden_spaces {
+            assert!(
+                hidden_ids.insert(hidden.id.as_str()),
+                "hidden space {} is listed more than once",
+                hidden.id
+            );
+            assert!(
+                !self.workspaces.iter().any(|ws| ws.id == hidden.id),
+                "hidden space {} shares its id with an open workspace",
+                hidden.id
+            );
+        }
         if self.workspaces.is_empty() {
             assert!(
                 self.active.is_none(),

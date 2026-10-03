@@ -6,15 +6,18 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
-            ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item("Rename", Action::Rename), item("Close", Action::Close)]
-            }
+            ClientContextMenuTarget::Workspace { is_git: false, .. } => vec![
+                item("Rename", Action::Rename),
+                item("Hide", Action::Hide),
+                item("Close", Action::Close),
+            ],
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
             } => vec![
                 item("Rename", Action::Rename),
+                item("Hide", Action::Hide),
                 item("Close", Action::Close),
                 item("New worktree", Action::NewWorktree),
                 item("Open worktree...", Action::OpenWorktree),
@@ -24,6 +27,7 @@ impl ClientContextMenuOverlay {
                 ..
             } => vec![
                 item("Rename", Action::Rename),
+                item("Hide", Action::Hide),
                 item("Close", Action::Close),
                 item("Delete worktree checkout...", Action::RemoveWorktree),
             ],
@@ -34,6 +38,10 @@ impl ClientContextMenuOverlay {
                 ..
             } => vec![
                 item("Rename", Action::Rename),
+                item(
+                    if *close_group { "Hide group" } else { "Hide" },
+                    Action::Hide,
+                ),
                 item(
                     if *close_group { "Close group" } else { "Close" },
                     Action::Close,
@@ -248,6 +256,7 @@ impl ClientShellState {
                     }));
                 }
             }
+            ClientContextMenuAction::Hide => self.request_workspace_hide(workspace_id, outcome),
             ClientContextMenuAction::Close => {
                 self.request_workspace_close(workspace_id, Some(close_group), outcome);
             }

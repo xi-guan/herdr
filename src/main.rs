@@ -157,6 +157,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # remove_worktree = ""  # optional, unset by default; opens confirmation
 # rename_workspace = "prefix+shift+w"
 # close_workspace = "prefix+shift+d"
+# hide_workspace = "prefix+shift+s"
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # previous_agent = ""     # optional, unset by default

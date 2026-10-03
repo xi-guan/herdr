@@ -538,6 +538,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            hidden_spaces: Default::default(),
         }
     }
 
@@ -552,6 +553,57 @@ mod tests {
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
+    }
+
+    // a live handoff hands over the put-away spaces and keeps their ids reserved, not only the open ones
+    #[test]
+    fn a_handoff_keeps_the_hidden_spaces() {
+        let mut state = crate::app::state::AppState::test_new();
+        state.hidden_spaces = vec![
+            crate::app::state::HiddenSpace::new(
+                "wZ".into(),
+                Some("away".into()),
+                "/repo/away".into(),
+            ),
+            crate::app::state::HiddenSpace::new("w5".into(), None, "/repo/auto".into()),
+        ];
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+            state.hidden_spaces_snapshot(),
+        );
+        let manifest = manifest_for(snapshot, Vec::new(), None, None, None);
+        let received: HandoffManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).expect("manifest serializes"))
+                .expect("manifest loads");
+
+        assert_eq!(
+            crate::app::state::AppState::hidden_spaces_from_snapshot(
+                &received.snapshot.hidden_spaces
+            ),
+            state.hidden_spaces
+        );
+        let (events, _event_rx) = tokio::sync::mpsc::channel(4);
+        crate::persist::restore_handoff(
+            &received.snapshot,
+            0,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            &mut std::collections::HashMap::new(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("an empty handoff restores");
+        let generated = crate::workspace::generate_workspace_id();
+        assert!(
+            crate::workspace::public_workspace_number(&generated)
+                > crate::workspace::public_workspace_number("wZ"),
+            "{generated} must come after the hidden wZ"
+        );
     }
 
     #[test]

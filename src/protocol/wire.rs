@@ -978,6 +978,16 @@ pub struct ClientShellSnapshot {
     // optional so the frozen v1 snapshot and servers without it still decode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_usage: Option<ClientShellClaudeUsage>,
+    // optional like claude_usage: the frozen v1 snapshot and servers without hiding still decode
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_workspaces: Vec<ClientShellHiddenWorkspace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellHiddenWorkspace {
+    pub workspace_id: String,
+    pub label: String,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2918,6 +2928,11 @@ mod tests {
                 }],
                 seven_day_tokens: Some(31_000_000),
             }),
+            hidden_workspaces: vec![ClientShellHiddenWorkspace {
+                workspace_id: "w9".into(),
+                label: "away".into(),
+                cwd: "/repo/away".into(),
+            }],
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

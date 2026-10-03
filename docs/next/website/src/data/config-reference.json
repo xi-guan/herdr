@@ -530,6 +530,12 @@
           "description": "Close the selected workspace."
         },
         {
+          "key": "keys.hide_workspace",
+          "type": "keybinding",
+          "default": "\"prefix+shift+s\"",
+          "description": "Put the selected workspace away; its name and directory stay so it can be opened again."
+        },
+        {
           "key": "keys.workspace_picker",
           "type": "keybinding",
           "default": "\"prefix+w\"",

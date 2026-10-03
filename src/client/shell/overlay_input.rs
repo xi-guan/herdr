@@ -1015,6 +1015,20 @@ impl ClientShellState {
         );
     }
 
+    // no confirmation: hiding keeps a way back, so it is not the loss closing is
+    pub(super) fn request_workspace_hide(
+        &mut self,
+        workspace_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.push_endpoint_method(
+            crate::api::schema::Method::WorkspaceHide(crate::api::schema::WorkspaceTarget {
+                workspace_id,
+            }),
+            outcome,
+        );
+    }
+
     pub(super) fn request_tab_close(&mut self, tab_id: String, outcome: &mut ClientShellInput) {
         let workspace_id = self.snapshot.as_deref().and_then(|snapshot| {
             let target = snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id)?;

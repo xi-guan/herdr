@@ -255,6 +255,16 @@ pub(super) fn snapshot_with_completions(
             .collect(),
         seven_day_tokens: app.state.claude_seven_day_tokens,
     });
+    let hidden_workspaces = app
+        .state
+        .hidden_spaces
+        .iter()
+        .map(|hidden| protocol::ClientShellHiddenWorkspace {
+            workspace_id: hidden.id.clone(),
+            label: hidden.display_label().to_owned(),
+            cwd: hidden.cwd.display().to_string(),
+        })
+        .collect();
 
     let shell = protocol::ClientShellSnapshot {
         boot_id: boot_id.to_owned(),
@@ -281,6 +291,7 @@ pub(super) fn snapshot_with_completions(
         agents,
         commands: app.client_shell_command_manifest(),
         claude_usage,
+        hidden_workspaces,
     };
     (shell, completions)
 }
@@ -769,6 +780,56 @@ mod tests {
             )),
             Some(("0.8.3", "### Changed\n- Client shell", true))
         );
+    }
+
+    #[test]
+    fn snapshot_lists_hidden_workspaces_apart_from_the_open_ones() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("open")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        assert!(snapshot(&app, "boot", 7, None, None)
+            .hidden_workspaces
+            .is_empty());
+
+        app.state.hidden_spaces = vec![
+            crate::app::state::HiddenSpace::new(
+                "w9".into(),
+                Some("away".into()),
+                "/repo/away".into(),
+            ),
+            crate::app::state::HiddenSpace::new("w4".into(), None, "/repo/auto".into()),
+        ];
+        let first = snapshot(&app, "boot", 7, None, None);
+
+        assert_eq!(
+            first.hidden_workspaces,
+            vec![
+                protocol::ClientShellHiddenWorkspace {
+                    workspace_id: "w9".into(),
+                    label: "away".into(),
+                    cwd: "/repo/away".into(),
+                },
+                protocol::ClientShellHiddenWorkspace {
+                    workspace_id: "w4".into(),
+                    label: "auto".into(),
+                    cwd: "/repo/auto".into(),
+                },
+            ]
+        );
+        assert_eq!(first.workspaces.len(), 1);
+        assert!(first
+            .workspaces
+            .iter()
+            .all(|workspace| workspace.workspace_id != "w9" && workspace.workspace_id != "w4"));
+        assert_eq!(snapshot(&app, "boot", 7, None, None), first);
     }
 
     // a snapshot that moved on its own would be resent to every client on every frame

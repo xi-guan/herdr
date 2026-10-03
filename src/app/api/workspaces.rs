@@ -361,6 +361,81 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// close the workspace but remember its name and directory; a group parent hides the set close takes
+    pub(super) fn handle_workspace_hide(&mut self, id: String, target: WorkspaceTarget) -> String {
+        let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
+            return workspace_not_found(id, &target.workspace_id);
+        };
+        if self.state.workspaces.get(index).is_none() {
+            return workspace_not_found(id, &target.workspace_id);
+        }
+
+        let close_indices = self.state.workspace_close_indices(index);
+        let hidden = close_indices
+            .iter()
+            .filter_map(|&idx| {
+                let cwd = self.seed_cwd_from_workspace(idx).or_else(|| {
+                    self.state
+                        .workspaces
+                        .get(idx)
+                        .map(|ws| ws.identity_cwd.clone())
+                })?;
+                let ws = self.state.workspaces.get(idx)?;
+                Some(crate::app::state::HiddenSpace::new(
+                    ws.id.clone(),
+                    ws.custom_name.clone(),
+                    cwd,
+                ))
+            })
+            .collect::<Vec<_>>();
+        // oldest first so the newest ends up at the front of the list
+        for entry in hidden {
+            self.state.remember_hidden_space(entry);
+        }
+
+        // hiding states its group intent by itself, so it closes exactly what it remembered
+        self.handle_workspace_close(
+            id,
+            WorkspaceCloseParams {
+                workspace_id: target.workspace_id,
+                close_group: close_indices.len() >= 2,
+            },
+        )
+    }
+
+    pub(super) fn handle_workspace_unhide(
+        &mut self,
+        id: String,
+        params: crate::api::schema::WorkspaceUnhideParams,
+    ) -> String {
+        let Some(hidden) = self.state.hidden_space(&params.workspace_id).cloned() else {
+            return encode_error(
+                id,
+                "hidden_workspace_not_found",
+                format!("hidden workspace {} not found", params.workspace_id),
+            );
+        };
+
+        let before = self.state.workspaces.len();
+        let response = self.handle_workspace_create(
+            id,
+            WorkspaceCreateParams {
+                source_workspace_id: None,
+                cwd: Some(hidden.cwd.display().to_string()),
+                focus: params.focus,
+                label: hidden.label.clone(),
+                env: Default::default(),
+                // a space taken back opens like any new one: as a pair, not the column its layout lost
+                second_column: true,
+            },
+        );
+        // a space that failed to open is still hidden; only a real one replaces it
+        if self.state.workspaces.len() > before {
+            self.state.forget_hidden_space(&hidden.id);
+        }
+        response
+    }
+
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {
         self.state
             .workspaces
@@ -876,6 +951,164 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(app.state.workspaces[0].display_name(), "parent");
+    }
+
+    #[tokio::test]
+    async fn api_workspace_hide_then_unhide_brings_the_space_back() {
+        use super::super::test_support::shutdown_test_runtimes;
+
+        let mut app = app_for_create_tests();
+        app.state.workspaces = vec![Workspace::test_new("away")];
+        app.state.workspaces[0].identity_cwd = std::env::temp_dir();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        let response = app.handle_workspace_hide(
+            "hide".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.state.hidden_spaces.len(), 1);
+        assert_eq!(app.state.hidden_spaces[0].display_label(), "away");
+
+        let response = app.handle_workspace_unhide(
+            "unhide".into(),
+            crate::api::schema::WorkspaceUnhideParams {
+                workspace_id,
+                focus: true,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(
+            app.state.workspaces[0].custom_name.as_deref(),
+            Some("away"),
+            "it comes back under the name it had"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.pane_ids().len(),
+            2,
+            "it comes back as a pair, like any new space"
+        );
+        assert!(app.state.hidden_spaces.is_empty());
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn api_workspace_unhide_rejects_an_unknown_id() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let response = app.handle_workspace_unhide(
+            "req".into(),
+            crate::api::schema::WorkspaceUnhideParams {
+                workspace_id: "ws_missing".into(),
+                focus: false,
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "hidden_workspace_not_found");
+    }
+
+    // hiding needs no explicit group intent: the parent takes its group, as close with intent would
+    #[test]
+    fn api_workspace_hide_noncontiguous_group_preserves_adversarial_identity_state() {
+        let mut app = app_with_worktree_group();
+        let parent = app.state.workspaces.remove(0);
+        let linked = app.state.workspaces.remove(0);
+        app.state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        let survivor_id = app.state.workspaces[0].id.clone();
+        app.state.workspaces.insert(0, parent);
+        app.state.workspaces.push(linked);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.ensure_test_terminals();
+        app.state.assert_invariants_for_test();
+        let parent_id = app.public_workspace_id(0);
+        let linked_id = app.public_workspace_id(2);
+
+        let request = serde_json::from_value(serde_json::json!({
+            "id": "req",
+            "method": "workspace.hide",
+            "params": { "workspace_id": parent_id }
+        }))
+        .unwrap();
+        let response = app.handle_api_request(request);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        app.state.assert_invariants_for_test();
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>(),
+            [survivor_id]
+        );
+        assert_eq!(
+            app.state
+                .hidden_spaces
+                .iter()
+                .map(|hidden| hidden.id.clone())
+                .collect::<Vec<_>>(),
+            [linked_id.clone(), parent_id.clone()]
+        );
+        let closed_events = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::WorkspaceClosed { workspace_id, .. } => Some(workspace_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closed_events, [parent_id, linked_id]);
+    }
+
+    #[test]
+    fn api_workspace_hide_of_a_duplicate_repo_parent_hides_only_that_space() {
+        let mut app = app_with_worktree_group();
+        let mut duplicate = Workspace::test_new("duplicate");
+        duplicate.worktree_space = app.state.workspaces[0].worktree_space.clone();
+        app.state.workspaces.push(duplicate);
+        app.state.ensure_test_terminals();
+        let duplicate_id = app.public_workspace_id(2);
+
+        let response = app.handle_workspace_hide(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: duplicate_id.clone(),
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(
+            app.state
+                .hidden_spaces
+                .iter()
+                .map(|hidden| hidden.id.clone())
+                .collect::<Vec<_>>(),
+            [duplicate_id]
+        );
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

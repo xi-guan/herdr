@@ -47,6 +47,7 @@ impl App {
                 &self.terminal_runtimes,
                 self.state.active,
                 self.state.selected,
+                self.state.hidden_spaces_snapshot(),
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(

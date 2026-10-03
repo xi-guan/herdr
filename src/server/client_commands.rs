@@ -46,9 +46,11 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "workspace.close",
     "workspace.create",
     "workspace.focus",
+    "workspace.hide",
     "workspace.move",
     "workspace.move_block",
     "workspace.rename",
+    "workspace.unhide",
     "worktree.create",
     "worktree.list",
     "worktree.open",
@@ -310,6 +312,15 @@ mod tests {
             (
                 "worktree.open",
                 "d1097c712fbd4817fc8f23cb7729d06982a3ce2c9dc8d303c530d9f19a2cd9fc",
+            ),
+            // fork: put-away spaces are new methods, so an older server just reports them unsupported
+            (
+                "workspace.hide",
+                "7e4666eae7bdc7fe38b612fb45c2031b4b1ea5db415fa7d063896c6e2ecf11e0",
+            ),
+            (
+                "workspace.unhide",
+                "5b4b86341064d4ae23e7ede74cc72204c3c811180e72dbccc5f6de836cc26f9c",
             ),
         ] {
             assert_eq!(actual.remove(method).as_deref(), Some(digest), "{method}");

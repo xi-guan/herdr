@@ -378,6 +378,10 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             policy.restore_session && snapshot.is_none(),
         )));
+        let hidden_spaces = snapshot
+            .as_ref()
+            .map(|snap| state::AppState::hidden_spaces_from_snapshot(&snap.hidden_spaces))
+            .unwrap_or_default();
         let (workspaces, active, selected) = if let Some(snap) = snapshot {
             let history = config
                 .experimental
@@ -460,6 +464,7 @@ impl App {
             should_quit: false,
             request_client_config_reload: false,
             worktree_directory,
+            hidden_spaces,
             latest_release_notes,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -673,6 +678,8 @@ impl App {
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.state.hidden_spaces =
+            state::AppState::hidden_spaces_from_snapshot(&snapshot.hidden_spaces);
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot

@@ -1060,6 +1060,10 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
             }
+            Method::WorkspaceHide(target) => return self.handle_workspace_hide(request.id, target),
+            Method::WorkspaceUnhide(params) => {
+                return self.handle_workspace_unhide(request.id, params)
+            }
             Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
                 return responses::encode_error(
                     request.id,

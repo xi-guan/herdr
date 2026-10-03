@@ -248,6 +248,7 @@ mod tests {
             agents: Vec::new(),
             commands: Vec::new(),
             claude_usage: None,
+            hidden_workspaces: Vec::new(),
         }
     }
 
@@ -305,6 +306,7 @@ mod tests {
         assert_eq!(kind, ENDPOINT_SNAPSHOT_KIND);
         // an absent reading stays off the wire, so older clients see the v1 shape unchanged
         assert!(!data.contains("claude_usage"));
+        assert!(!data.contains("hidden_workspaces"));
         let decoded: ClientShellSnapshot = serde_json::from_str(&data).unwrap();
         assert_eq!(decoded, snapshot);
     }

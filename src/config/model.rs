@@ -353,6 +353,8 @@ pub struct KeysConfig {
     pub rename_workspace: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
+    /// Put the selected workspace away; its name and directory stay so it can be opened again. Default: "prefix+shift+s"
+    pub hide_workspace: BindingConfig,
     /// Open the workspace navigation surface. Default: "prefix+w"
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
@@ -490,6 +492,8 @@ pub(crate) struct KeysConfigOverlay {
     rename_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_workspace: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hide_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_picker: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -652,6 +656,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(remove_worktree);
         apply_field!(rename_workspace);
         apply_field!(close_workspace);
+        apply_field!(hide_workspace);
         apply_field!(workspace_picker);
         apply_field!(goto);
         apply_field!(navigate_workspace_up);
@@ -757,6 +762,7 @@ impl KeysConfig {
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
+        copy_effective_action_field!(hide_workspace, keybinds.hide_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
@@ -1126,6 +1132,7 @@ impl Default for KeysConfig {
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             close_workspace: BindingConfig::one("prefix+shift+d"),
+            hide_workspace: BindingConfig::one("prefix+shift+s"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
             navigate_workspace_up: BindingConfig::one("up"),

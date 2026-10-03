@@ -15,8 +15,8 @@ use crate::workspace::WorkspaceGitStatus;
 
 use super::api_helpers::pane_agent_status;
 use super::state::{
-    AgentNotificationDelivery, AppState, Mode, PaneFocusTarget, PendingAgentNotification,
-    ToastKind, ToastNotification, ToastTarget,
+    AgentNotificationDelivery, AppState, HiddenSpace, Mode, PaneFocusTarget,
+    PendingAgentNotification, ToastKind, ToastNotification, ToastTarget,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -715,6 +715,24 @@ impl AppState {
     pub fn close_selected_workspace(&mut self) {
         let close_indices = self.workspace_close_indices(self.selected);
         self.close_workspaces(close_indices);
+    }
+
+    /// newest first; hiding a space already remembered moves it to the front instead of listing it twice
+    pub(crate) fn remember_hidden_space(&mut self, hidden: HiddenSpace) {
+        self.hidden_spaces.retain(|entry| entry.id != hidden.id);
+        self.hidden_spaces.insert(0, hidden);
+        self.mark_session_dirty();
+    }
+
+    pub(crate) fn hidden_space(&self, id: &str) -> Option<&HiddenSpace> {
+        self.hidden_spaces.iter().find(|entry| entry.id == id)
+    }
+
+    pub(crate) fn forget_hidden_space(&mut self, id: &str) -> Option<HiddenSpace> {
+        let idx = self.hidden_spaces.iter().position(|entry| entry.id == id)?;
+        let removed = self.hidden_spaces.remove(idx);
+        self.mark_session_dirty();
+        Some(removed)
     }
 
     pub(crate) fn close_workspaces(&mut self, close_indices: Vec<usize>) {
@@ -2884,6 +2902,40 @@ mod tests {
         assert_eq!(state.selected, 1);
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].custom_name.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn hiding_the_same_space_twice_leaves_one_row() {
+        let mut state = app_with_workspaces(&["a"]);
+        let hidden = HiddenSpace::new(
+            state.workspaces[0].id.clone(),
+            Some("a".into()),
+            "/repo/a".into(),
+        );
+        state.remember_hidden_space(hidden.clone());
+        state.remember_hidden_space(hidden.clone());
+
+        assert_eq!(state.hidden_spaces.len(), 1);
+        assert_eq!(state.forget_hidden_space(&hidden.id), Some(hidden));
+        assert!(state.hidden_spaces.is_empty());
+    }
+
+    // an auto-named space comes back under the same name, because the name was always the directory
+    #[test]
+    fn a_hidden_space_without_a_custom_name_reads_as_its_directory() {
+        let hidden = HiddenSpace::new("ws_1".into(), None, "/repo/herdr".into());
+
+        assert_eq!(hidden.display_label(), "herdr");
+    }
+
+    #[test]
+    #[should_panic(expected = "shares its id with an open workspace")]
+    fn invariants_reject_a_hidden_space_that_is_still_open() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        let open_id = state.workspaces[0].id.clone();
+        state.hidden_spaces = vec![HiddenSpace::new(open_id, None, "/repo/open".into())];
+
+        state.assert_invariants_for_test();
     }
 
     #[test]
