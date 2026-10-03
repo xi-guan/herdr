@@ -467,25 +467,23 @@ fn both_views_fill_the_sidebar_content_rect() {
 
 #[test]
 fn view_tabs_sit_on_the_first_content_row() {
-    let [spaces, agents] =
+    let [spaces, agents, hidden] =
         super::super::sidebar_tree::sidebar_view_tab_rects(Rect::new(0, 0, 26, 5));
 
     assert_eq!(spaces, Rect::new(0, 0, 7, 1));
     assert_eq!(agents, Rect::new(10, 0, 6, 1));
+    assert_eq!(hidden, Rect::new(19, 0, 6, 1));
 }
 
 /// a header too narrow for every tab keeps the ones that fit rather than drawing one off its label
 #[test]
 fn view_tabs_clip_to_the_header_width() {
-    let [spaces, agents] =
+    let [spaces, agents, hidden] =
         super::super::sidebar_tree::sidebar_view_tab_rects(Rect::new(0, 0, 19, 5));
+
     assert_eq!(spaces, Rect::new(0, 0, 7, 1));
     assert_eq!(agents, Rect::new(10, 0, 6, 1));
-
-    let [spaces, agents] =
-        super::super::sidebar_tree::sidebar_view_tab_rects(Rect::new(0, 0, 9, 5));
-    assert_eq!(spaces, Rect::new(0, 0, 7, 1));
-    assert_eq!(agents.width, 0);
+    assert_eq!(hidden.width, 0);
 }
 
 /// an ordinal reads as "which one", and stays one cell wide while Unicode still encloses it
@@ -965,7 +963,7 @@ fn clicking_view_tabs_switches_sidebar_views() {
         Config::default(),
     );
     state.compose(106, 20).expect("sidebar");
-    let [spaces, agents] =
+    let [spaces, agents, _hidden] =
         super::super::sidebar_tree::sidebar_view_tab_rects(Rect::new(0, 0, 25, 20));
     let click = |state: &mut ClientShellState, column, row| {
         state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
@@ -1242,4 +1240,217 @@ fn walking_to_a_waiting_agent_reveals_its_row() {
         .agents
         .iter()
         .any(|(_, pane_id)| pane_id == "pane_20"));
+}
+
+fn hidden_space(id: &str, label: &str) -> crate::protocol::ClientShellHiddenWorkspace {
+    crate::protocol::ClientShellHiddenWorkspace {
+        workspace_id: id.into(),
+        label: label.into(),
+        cwd: format!("/repo/{label}"),
+    }
+}
+
+fn shell_with_one_hidden_space() -> ClientShellState {
+    let mut projected = tree(vec![space(1, "open")], Vec::new());
+    projected.hidden_workspaces = vec![hidden_space("ws_9", "away")];
+    let mut state = shell(projected, Config::default());
+    state.compose(106, 20).expect("sidebar");
+    state
+}
+
+fn hidden_view(state: &mut ClientShellState) -> Rect {
+    state.sidebar_view = preferences::SidebarView::Hidden;
+    state.compose(106, 20).expect("hidden view");
+    let body = Rect::new(0, 2, 25, 17);
+    let row = super::super::sidebar_tree::hidden_space_row_y(body, 0).expect("the entry has a row");
+    Rect::new(body.x, row, body.width, 1)
+}
+
+fn restore_requests(outcome: &ClientShellInput) -> Vec<(String, String, bool)> {
+    outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::WorkspaceUnhide(params) => Some((
+                    request.id.clone(),
+                    params.workspace_id.clone(),
+                    params.focus,
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn clicking_the_hidden_tab_switches_to_the_hidden_view() {
+    let mut state = shell_with_one_hidden_space();
+    let [_, _, hidden_tab] =
+        super::super::sidebar_tree::sidebar_view_tab_rects(Rect::new(0, 0, 25, 20));
+
+    click_at(&mut state, hidden_tab.x, hidden_tab.y);
+    state.compose(106, 20).expect("hidden view");
+
+    assert_eq!(state.sidebar_view, preferences::SidebarView::Hidden);
+    assert!(state.hits.workspaces.is_empty());
+}
+
+#[test]
+fn clicking_a_hidden_space_asks_for_it_back() {
+    let mut state = shell_with_one_hidden_space();
+    let row = hidden_view(&mut state);
+
+    assert_eq!(state.hits.hidden_workspaces, [(row, "ws_9".to_owned())]);
+}
+
+/// a left click points at a put-away space without dragging it back; only the menu does that
+#[test]
+fn left_clicking_a_hidden_space_only_points_at_it() {
+    let mut state = shell_with_one_hidden_space();
+    let row = hidden_view(&mut state);
+    state.mode = ClientShellMode::Navigate;
+    state.navigate_workspace_id = state.navigation_target(&ClientEndpointId::Local, "ws_1");
+
+    let outcome = click_at(&mut state, row.x + 1, row.y);
+
+    assert!(outcome.actions.is_empty());
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    assert_eq!(state.selected_hidden_workspace.as_deref(), Some("ws_9"));
+}
+
+#[test]
+fn right_clicking_a_hidden_space_offers_to_restore_it() {
+    let mut state = shell_with_one_hidden_space();
+    let row = hidden_view(&mut state);
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("hidden space menu");
+    };
+    assert!(matches!(
+        &menu.target,
+        ClientContextMenuTarget::HiddenWorkspace { workspace_id } if workspace_id == "ws_9"
+    ));
+    assert_eq!(
+        menu.items()
+            .iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>(),
+        ["Restore"]
+    );
+    assert_eq!(state.selected_hidden_workspace.as_deref(), Some("ws_9"));
+    assert!(
+        menu.y > row.y,
+        "the menu covers the row it came from: {} over row {}",
+        menu.y,
+        row.y
+    );
+}
+
+/// the rows only exist in their own view; the spaces tree owns those rows
+#[test]
+fn hidden_rows_do_not_answer_from_the_spaces_view() {
+    let state = shell_with_one_hidden_space();
+
+    assert_eq!(state.sidebar_view, preferences::SidebarView::Spaces);
+    assert!(state.hits.hidden_workspaces.is_empty());
+}
+
+/// drawing the row alone proves nothing: what is drawn after it decides whether the fill survives
+#[test]
+fn the_picked_hidden_row_survives_the_whole_sidebar() {
+    let mut projected = tree(vec![space(1, "open")], Vec::new());
+    projected.hidden_workspaces = vec![
+        hidden_space("ws_1", "first"),
+        hidden_space("ws_2", "second"),
+    ];
+    let mut state = shell(projected, Config::default());
+    state.sidebar_view = preferences::SidebarView::Hidden;
+    state.selected_hidden_workspace = Some("ws_2".into());
+
+    let frame = state.compose(106, 12).expect("hidden view").frame;
+    let body = Rect::new(0, 2, 25, 9);
+    let untouched = super::super::sidebar_tree::hidden_space_row_y(body, 0).expect("first row");
+    let picked = super::super::sidebar_tree::hidden_space_row_y(body, 1).expect("second row");
+    let accent = state.config.palette.accent;
+
+    // every cell of the row, not just the ones the text reaches
+    for x in body.x..body.right() {
+        assert_eq!(
+            style_at(&frame, x, picked).bg,
+            Some(accent),
+            "column {x} of row {picked}: {:?}",
+            row_text(&frame, picked, 26)
+        );
+        assert_ne!(style_at(&frame, x, untouched).bg, Some(accent));
+    }
+}
+
+/// a row names the space and, where it fits, the directory it lived in
+#[test]
+fn hidden_rows_name_the_space_and_its_parent_directory() {
+    let mut state = shell_with_one_hidden_space();
+    let row = hidden_view(&mut state);
+    let frame = state.compose(106, 20).expect("hidden view").frame;
+
+    assert_eq!(row_text(&frame, row.y, 25), " away /repo");
+
+    let mut empty = shell(tree(vec![space(1, "open")], Vec::new()), Config::default());
+    empty.sidebar_view = preferences::SidebarView::Hidden;
+    let frame = empty.compose(106, 20).expect("empty hidden view").frame;
+    assert_eq!(row_text(&frame, 2, 25), " nothing hidden");
+}
+
+#[test]
+fn restoring_a_hidden_space_returns_to_the_tree_and_a_failed_one_stays() {
+    for succeed in [true, false] {
+        let mut state = shell_with_one_hidden_space();
+        hidden_view(&mut state);
+        state.open_hidden_workspace_context_menu("ws_9".into(), 1, 2);
+        let mut outcome = ClientShellInput::default();
+        state.activate_context_menu_item(0, &mut outcome);
+
+        let requests = restore_requests(&outcome);
+        assert_eq!(requests.len(), 1);
+        let (request_id, workspace_id, focus) = &requests[0];
+        assert_eq!(workspace_id, "ws_9");
+        assert!(focus);
+        let result = if succeed {
+            Ok(crate::api::schema::ResponseResult::Ok {})
+        } else {
+            Err(ClientShellEndpointError {
+                code: Some("workspace_not_found".into()),
+                message: "no such hidden workspace".into(),
+            })
+        };
+        let (repaint, _) = state.handle_endpoint_result("boot-1", request_id, result);
+
+        assert!(repaint);
+        if succeed {
+            assert_eq!(state.sidebar_view, preferences::SidebarView::Spaces);
+            assert_eq!(state.selected_hidden_workspace, None);
+        } else {
+            assert_eq!(state.sidebar_view, preferences::SidebarView::Hidden);
+        }
+    }
+}
+
+/// the hidden view is a place to visit, so a restart never opens on it
+#[test]
+fn the_hidden_view_is_never_restored() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.preferences.sidebar_view = Some(preferences::SidebarView::Hidden);
+    assert_eq!(
+        ClientShellState::new(config).sidebar_view,
+        preferences::SidebarView::Spaces
+    );
 }

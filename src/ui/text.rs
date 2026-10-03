@@ -19,6 +19,36 @@ pub(crate) fn truncate_end(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+pub(crate) fn middle_elide(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+
+    let content_width = max_width.saturating_sub(1);
+    let left_width = content_width / 2;
+    let right_width = content_width.saturating_sub(left_width);
+    let prefix = take_prefix_width(text, left_width);
+    let suffix = take_suffix_width(text, right_width);
+    format!("{prefix}…{suffix}")
+}
+
+fn take_suffix_width(text: &str, max_width: usize) -> String {
+    let mut output = Vec::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        output.push(ch);
+        width += ch_width;
+    }
+    output.into_iter().rev().collect()
+}
+
 fn take_prefix_width(text: &str, max_width: usize) -> String {
     let mut output = String::new();
     let mut width = 0usize;
@@ -43,5 +73,13 @@ mod tests {
 
         assert_eq!(text, "提交 herdr 的反…");
         assert!(display_width(&text) <= 16);
+    }
+
+    #[test]
+    fn middle_elide_uses_display_width() {
+        let text = middle_elide("重构用户认证模块并迁移到统一登录服务", 12);
+
+        assert!(text.contains('…'));
+        assert!(display_width(&text) <= 12);
     }
 }
