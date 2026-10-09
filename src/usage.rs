@@ -214,7 +214,7 @@ fn token_window(now: u64) -> Option<(i64, i64)> {
     Some((from.try_into().ok()?, today.try_into().ok()?))
 }
 
-// claude's own arithmetic, matched against a settled day: input plus output, no cache, no dedup
+// claude's own arithmetic, matched against a settled day: input, output and both cache figures, no dedup
 fn entry_tokens(line: &str, (from, until): (i64, i64)) -> u64 {
     let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
         return 0;
@@ -230,10 +230,15 @@ fn entry_tokens(line: &str, (from, until): (i64, i64)) -> u64 {
     let Some(usage) = entry.pointer("/message/usage") else {
         return 0;
     };
-    ["input_tokens", "output_tokens"]
-        .iter()
-        .filter_map(|field| usage.get(field).and_then(serde_json::Value::as_u64))
-        .sum()
+    [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .iter()
+    .filter_map(|field| usage.get(field).and_then(serde_json::Value::as_u64))
+    .sum()
 }
 
 // transcripts are append-only, so one last written before the window opened holds nothing in it
@@ -244,6 +249,23 @@ fn touched_within(file: &std::fs::DirEntry, from: i64) -> bool {
         .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|since| i64::try_from(since.as_secs()).ok())
         .is_none_or(|at| at >= from)
+}
+
+// claude reads no more than this off a transcript's end, so what lies before it never reaches its figure
+const TRANSCRIPT_TAIL: u64 = 100 * 1024 * 1024;
+
+// claude's cut too: the first line in the tail is dropped whole, even when the cut fell on its start
+fn transcript_tail(path: &std::path::Path, tail: u64) -> Option<std::io::BufReader<std::fs::File>> {
+    use std::io::{BufRead as _, Seek as _};
+
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut reader = std::io::BufReader::new(file);
+    if size > tail {
+        reader.seek(std::io::SeekFrom::Start(size - tail)).ok()?;
+        reader.read_until(b'\n', &mut Vec::new()).ok()?;
+    }
+    Some(reader)
 }
 
 // none when the transcripts cannot be read: a zero the account never spent would say more
@@ -260,17 +282,22 @@ fn transcript_tokens(dir: &std::path::Path, window: (i64, i64)) -> Option<u64> {
         .filter_map(|project| std::fs::read_dir(project.path()).ok())
         .flat_map(std::iter::IntoIterator::into_iter)
         .flatten()
+        // a subagent's transcript sits under the session that spawned it, and claude counts it too
+        .flat_map(|entry| {
+            let subagents = std::fs::read_dir(entry.path().join("subagents"));
+            std::iter::once(entry).chain(subagents.into_iter().flatten().flatten())
+        })
     {
         let path = session.path();
         if path.extension().is_none_or(|ext| ext != "jsonl") || !touched_within(&session, window.0)
         {
             continue;
         }
-        let Ok(file) = std::fs::File::open(&path) else {
+        let Some(reader) = transcript_tail(&path, TRANSCRIPT_TAIL) else {
             continue;
         };
         // by line: one session can run for days and leave a file far larger than the figures wanted
-        for line in std::io::BufReader::new(file)
+        for line in reader
             .lines()
             .map_while(Result::ok)
             // parsing every user turn and tool result costs more than the tally is worth
@@ -412,9 +439,9 @@ mod tests {
         );
     }
 
-    // the cache figures dwarf input and output, so letting one through would show a wrong figure
+    // claude's stats count the cache too, and it dwarfs input and output, so leaving it out is orders off
     #[test]
-    fn a_counted_entry_takes_input_and_output_from_within_the_window_only() {
+    fn a_counted_entry_takes_every_token_kind_from_within_the_window_only() {
         let window = (1_785_628_800, 1_785_715_200);
         let entry = |stamp: &str| {
             format!(
@@ -424,7 +451,10 @@ mod tests {
             )
         };
 
-        assert_eq!(entry_tokens(&entry("2026-08-02T09:15:00.482Z"), window), 42);
+        assert_eq!(
+            entry_tokens(&entry("2026-08-02T09:15:00.482Z"), window),
+            905_042
+        );
         assert_eq!(entry_tokens(&entry("2026-08-01T23:59:59Z"), window), 0);
         assert_eq!(entry_tokens(&entry("2026-08-03T00:00:00Z"), window), 0);
         assert_eq!(
@@ -472,14 +502,45 @@ mod tests {
             projects.join("-home-me-two/notes.md"),
             reply("2026-08-02T22:10:00Z", 9, 9),
         );
+        write(
+            projects.join("-home-me-one/aaa/subagents/agent-x.jsonl"),
+            reply("2026-08-02T10:00:00Z", 3, 4),
+        );
 
         let window = (1_785_628_800, 1_785_715_200);
-        assert_eq!(transcript_tokens(&projects, window), Some(42 + 107));
+        assert_eq!(
+            transcript_tokens(&projects, window),
+            Some(42 + 107 + 7 + 3 * 900_000)
+        );
         assert_eq!(transcript_tokens(&projects, (window.1, window.1)), Some(0));
         // a zero the account never spent would say more than a missing figure
         assert_eq!(transcript_tokens(&root.join("missing"), window), None);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // a long session's early days fall out of claude's figure, so counting them would read above it
+    #[test]
+    fn only_the_tail_claude_reads_is_counted() {
+        use std::io::BufRead as _;
+
+        let path = std::env::temp_dir().join(format!("herdr-tail-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "aaaa\nbbbb\ncccc\n").expect("a transcript is writable");
+        let lines = |tail| {
+            transcript_tail(&path, tail)
+                .expect("a transcript is readable")
+                .lines()
+                .map_while(Result::ok)
+                .collect::<Vec<_>>()
+        };
+
+        // the cut lands inside `bbbb`, and the rest of that line goes with it
+        assert_eq!(lines(7), ["cccc"]);
+        // on a line's start it still drops that line, as claude does
+        assert_eq!(lines(10), ["cccc"]);
+        assert_eq!(lines(15), ["aaaa", "bbbb", "cccc"]);
+
+        std::fs::remove_file(&path).ok();
     }
 
     // the credential blob is claude's, and only its access token is wanted
