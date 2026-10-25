@@ -3,6 +3,10 @@ set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
 
+# vendored libghostty-vt needs zig 0.16.0 while the system zig stays older for pre-0.9 branches
+zig16 := home_directory() / ".local/share/zig/zig-aarch64-macos-0.16.0/zig"
+export ZIG := env("ZIG", if path_exists(zig16) == "true" { zig16 } else { "zig" })
+
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
@@ -320,3 +324,23 @@ uninstall:
     rm -f "$HOME/.local/bin/herdr"
     rm -rf target
     echo "removed installed binary and target/"
+
+# Free disk space: the debug build output and archived binaries picked with fzf
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -d target/debug ]; then
+        read -r -p "remove target/debug ($(du -sh target/debug | cut -f1))? [y/N] " reply
+        case "$reply" in [yY]*) cargo clean --profile dev ;; *) echo "kept target/debug" ;; esac
+    fi
+    archive="$HOME/.local/share/herdr-versions"
+    [ -n "$(ls -A "$archive" 2>/dev/null)" ] || exit 0
+    command -v fzf >/dev/null || { echo "fzf not found, install it to prune $archive: brew install fzf"; exit 1; }
+    # esc or an empty pick keeps every archived binary
+    picked=$(du -sh "$archive"/* | fzf --multi | cut -f2) || exit 0
+    [ -n "$picked" ] || exit 0
+    echo "$picked"
+    read -r -p "remove these archived binaries? [y/N] " reply
+    case "$reply" in [yY]*) ;; *) echo "aborted"; exit 0 ;; esac
+    while IFS= read -r dir; do rm -rf "$dir"; done <<< "$picked"
+    echo "removed archived binaries"
