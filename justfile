@@ -260,3 +260,63 @@ release $version $preview:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# ── fork-local dev workflow (not upstream) ──
+
+# Sync with upstream and rebase local work onto it
+pull:
+    git fetch upstream --prune
+    git pull --rebase --autostash upstream master
+
+# Prepare the dev environment: build tools, git hooks, cached deps
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for tool in bun python3 zig; do
+        command -v "$tool" >/dev/null || { echo "missing: $tool"; exit 1; }
+    done
+    # vendored libghostty-vt only builds against this exact zig; the build honours $ZIG
+    [ "$("${ZIG:-zig}" version)" = "0.16.0" ] || echo "warning: zig $("${ZIG:-zig}" version), herdr expects 0.16.0 (set ZIG)"
+    command -v cargo-nextest >/dev/null || cargo install cargo-nextest --locked
+    just install-hooks
+    cargo fetch --locked
+    echo "setup done — run: just check"
+
+# Build release and install to ~/.local/bin, archiving the current binary for rollback
+install: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="$HOME/.local/bin/herdr"
+    mkdir -p "$HOME/.local/bin"
+    if [ -x "$target" ]; then
+        archive="$HOME/.local/share/herdr-versions/$("$target" --version | awk '{print $2}')"
+        mkdir -p "$archive"
+        cp "$target" "$archive/herdr"
+        echo "archived current binary to $archive/herdr"
+    fi
+    install -m 755 target/release/herdr "$target"
+    target/release/herdr --version
+    echo "note: the running server keeps the old binary until: just restart"
+
+# Swap the running server onto the installed binary, keeping every agent alive
+restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # the fds move to the new server before the old one exits, so a failure here
+    # leaves the old server untouched rather than half-migrated
+    if herdr server live-handoff; then
+        exit 0
+    fi
+    echo "live handoff refused — the new binary could not take over." >&2
+    echo "run 'herdr server stop' to restart the hard way; agents resume from their session but lose in-flight work." >&2
+    exit 1
+
+# Remove the locally installed binary and build artifacts
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r -p "remove ~/.local/bin/herdr and ./target? [y/N] " reply
+    case "$reply" in [yY]*) ;; *) echo "aborted"; exit 0 ;; esac
+    rm -f "$HOME/.local/bin/herdr"
+    rm -rf target
+    echo "removed installed binary and target/"
