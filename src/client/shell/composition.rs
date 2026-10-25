@@ -77,6 +77,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            agent_swap: None,
             spinner_frame: self.agent_spinner_frame,
             navigating: self.mode == ClientShellMode::Navigate,
             sidebar_view: self.sidebar_view,
@@ -227,6 +228,13 @@ impl ClientShellState {
             ),
             _ => (None, None),
         };
+        let agent_swap = match &self.chrome_drag {
+            Some(ClientChromeDrag::Agent {
+                source_pane_id,
+                target_pane_id,
+            }) => Some((source_pane_id.as_str(), target_pane_id.as_deref())),
+            _ => None,
+        };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -256,6 +264,7 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                agent_swap,
                 spinner_frame: self.agent_spinner_frame,
                 navigating: self.mode == ClientShellMode::Navigate,
                 sidebar_view: self.sidebar_view,

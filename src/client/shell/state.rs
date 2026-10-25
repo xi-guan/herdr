@@ -197,6 +197,12 @@ pub(super) struct ClientTabPress {
     pub(super) start_row: u16,
 }
 
+pub(super) struct ClientAgentPress {
+    pub(super) pane_id: String,
+    pub(super) start_column: u16,
+    pub(super) start_row: u16,
+}
+
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
@@ -226,6 +232,10 @@ pub(super) enum ClientChromeDrag {
     Workspace {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
+    },
+    Agent {
+        source_pane_id: String,
+        target_pane_id: Option<String>,
     },
     PaneSplit {
         hit: PaneSplitHit,
@@ -901,6 +911,7 @@ pub(crate) struct ClientShellState {
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
+    pub(super) agent_press: Option<ClientAgentPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
@@ -1093,6 +1104,7 @@ impl ClientShellState {
             chrome_drag: None,
             workspace_press: None,
             tab_press: None,
+            agent_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
             workspace_scroll: 0,
@@ -1337,6 +1349,7 @@ impl ClientShellState {
         self.chrome_drag = None;
         self.workspace_press = None;
         self.tab_press = None;
+        self.agent_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
         self.pending_tree_reveal = None;
@@ -1791,6 +1804,7 @@ impl ClientShellState {
             self.chrome_drag = None;
             self.workspace_press = None;
             self.tab_press = None;
+            self.agent_press = None;
             if self.pane_mouse_gesture.as_ref().is_some_and(|gesture| {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())
             }) {

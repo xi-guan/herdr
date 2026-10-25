@@ -816,6 +816,44 @@ fn active_space_row_yields_its_fill_to_the_focused_agent_row() {
     assert_eq!(agent.bg, Some(state.config.palette.surface_dim));
 }
 
+/// the fill alone is a faint wash, so the focused row also lifts its text and marks its edge in blue
+#[test]
+fn focused_agent_row_brightens_its_text_and_marks_its_edge() {
+    let mut projected = colliding_siblings();
+    for agent in &mut projected.agents {
+        agent.terminal_title_stripped = Some("zzz".into());
+    }
+    let mut state = shell(projected, branch_rows());
+    // the default theme's accent is its blue, which would hide which one the mark uses
+    state.config.palette.blue = ratatui::style::Color::Rgb(1, 2, 3);
+    let frame = state.compose(106, 20).expect("sidebar frame").frame;
+    let palette = &state.config.palette;
+    let (focused, other) = (state.hits.agents[0].0, state.hits.agents[1].0);
+
+    let title = |rect: Rect| style_at(&frame, find_symbol_x(&frame, rect.y, 25, "z"), rect.y).fg;
+    assert_eq!(title(focused), Some(palette.text));
+    assert_eq!(title(other), Some(palette.overlay0));
+
+    let edge = focused.right() - 1;
+    assert_eq!(symbol_at(&frame, edge, focused.y), "┃");
+    assert_eq!(style_at(&frame, edge, focused.y).fg, Some(palette.blue));
+}
+
+#[test]
+fn highlighted_space_row_marks_its_edge_in_blue() {
+    let mut state = shell(tree(vec![space(1, "one")], Vec::new()), Config::default());
+    state.config.palette.blue = ratatui::style::Color::Rgb(1, 2, 3);
+    let frame = state.compose(106, 20).expect("sidebar frame").frame;
+    let row = state.hits.workspaces[0].rect;
+
+    let edge = row.right() - 1;
+    assert_eq!(symbol_at(&frame, edge, row.y), "┃");
+    assert_eq!(
+        style_at(&frame, edge, row.y).fg,
+        Some(state.config.palette.blue)
+    );
+}
+
 #[test]
 fn default_space_workspace_style_tracks_active_state() {
     let (state, frame) = compose_tree(
@@ -1453,4 +1491,210 @@ fn the_hidden_view_is_never_restored() {
         ClientShellState::new(config).sidebar_view,
         preferences::SidebarView::Spaces
     );
+}
+
+fn mouse_at(
+    state: &mut ClientShellState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+/// three spaces with an agent each, a rule between them, and the first space grabbed
+fn grabbed_first_space() -> ClientShellState {
+    let mut config = branch_rows();
+    config.ui.sidebar.spaces.row_gap = 1;
+    let mut state = shell(spaces_with_agents(3, AgentStatus::Idle), config);
+    state.compose(106, 20).expect("sidebar");
+    let first = state.hits.workspaces[0].rect;
+    click_at(&mut state, first.x + 4, first.y);
+    state
+}
+
+/// a space's agents hang under it, so the end of the list sits below the last space's agents
+#[test]
+fn dragging_a_space_to_the_end_drops_it_below_the_last_spaces_agents() {
+    let mut state = grabbed_first_space();
+    let last_agent = state.hits.agents[2].0;
+    let column = last_agent.x + 4;
+
+    mouse_at(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        last_agent.bottom() + 3,
+    );
+
+    assert!(matches!(
+        state.chrome_drag,
+        Some(ClientChromeDrag::Workspace { target: Some((None, row)), .. })
+            if row == last_agent.bottom()
+    ));
+    let frame = state.compose(106, 20).expect("drop indicator").frame;
+    assert_eq!(row_text(&frame, last_agent.y, 10), " │ cc");
+    let release = mouse_at(
+        &mut state,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        last_agent.bottom() + 3,
+    );
+    assert!(matches!(
+        &release.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::WorkspaceMove(params)
+                    if params.workspace_id == "ws_1" && params.insert_index == 3
+            )
+    ));
+}
+
+/// the slot lands on the rule between spaces, so it needs more than a colour to stand out from it
+#[test]
+fn the_space_drop_slot_is_a_heavy_blue_line_over_the_rule() {
+    let mut state = grabbed_first_space();
+    state.config.palette.blue = ratatui::style::Color::Rgb(1, 2, 3);
+    let second = state.hits.workspaces[1].rect;
+    let rule_y = second.y - 1;
+
+    mouse_at(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        second.x + 4,
+        rule_y,
+    );
+
+    let frame = state.compose(106, 20).expect("drop indicator").frame;
+    assert_eq!(symbol_at(&frame, second.x, rule_y), "━");
+    assert_eq!(
+        style_at(&frame, second.x, rule_y).fg,
+        Some(state.config.palette.blue)
+    );
+    // the other rules stay as they were
+    let third = state.hits.workspaces[2].rect;
+    assert_eq!(symbol_at(&frame, third.x, third.y - 1), "─");
+}
+
+fn swap_request(outcome: &ClientShellInput) -> Option<(&str, &str)> {
+    outcome.actions.iter().find_map(|action| match action {
+        ClientShellAction::Endpoint { request, .. } => match &request.method {
+            crate::api::schema::Method::PaneSwap(params) => Some((
+                params.source_pane_id.as_deref()?,
+                params.target_pane_id.as_deref()?,
+            )),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn agent_rows(state: &ClientShellState) -> Vec<Rect> {
+    state.hits.agents.iter().map(|(rect, _)| *rect).collect()
+}
+
+#[test]
+fn dragging_an_agent_row_onto_a_sibling_swaps_their_panes() {
+    let projected = tree(
+        vec![space(1, "one")],
+        vec![pi(1, 1, 1), pi(2, 1, 1), pi(3, 1, 1)],
+    );
+    let mut state = shell(projected, Config::default());
+    state.compose(106, 20).expect("sidebar");
+    let rows = agent_rows(&state);
+    let (first, third) = (rows[0], rows[2]);
+
+    let down = click_at(&mut state, first.x + 4, first.y);
+    assert_eq!(focused_pane_request(&down), Some("pane_1"));
+    mouse_at(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        third.x + 4,
+        third.y,
+    );
+    assert!(matches!(
+        &state.chrome_drag,
+        Some(ClientChromeDrag::Agent { source_pane_id, target_pane_id: Some(target) })
+            if source_pane_id == "pane_1" && target == "pane_3"
+    ));
+
+    let frame = state.compose(106, 20).expect("swap target").frame;
+    let palette = &state.config.palette;
+    let fill = |rect: Rect| style_at(&frame, rect.x + 4, rect.y).bg;
+    assert_eq!(fill(first), Some(palette.surface1));
+    assert_eq!(fill(third), Some(palette.surface0));
+    assert_eq!(symbol_at(&frame, third.right() - 1, third.y), "┃");
+
+    let release = mouse_at(
+        &mut state,
+        MouseEventKind::Up(MouseButton::Left),
+        third.x + 4,
+        third.y,
+    );
+    assert_eq!(swap_request(&release), Some(("pane_1", "pane_3")));
+    assert!(state.chrome_drag.is_none());
+}
+
+/// a swap trades two slots of one layout, so rows in another tab or space are no target
+#[test]
+fn an_agent_row_only_trades_places_within_its_own_tab() {
+    let mut projected = tree(
+        vec![space(1, "one"), space(2, "two")],
+        vec![pi(1, 1, 1), pi(2, 1, 3), pi(3, 2, 2)],
+    );
+    projected.tabs.push(tab(3, 1, "logs", true));
+    let mut state = shell(projected, Config::default());
+    state.compose(106, 20).expect("sidebar");
+    let rows = agent_rows(&state);
+
+    click_at(&mut state, rows[0].x + 4, rows[0].y);
+    for row in &rows[1..] {
+        mouse_at(
+            &mut state,
+            MouseEventKind::Drag(MouseButton::Left),
+            row.x + 4,
+            row.y,
+        );
+        assert!(matches!(
+            state.chrome_drag,
+            Some(ClientChromeDrag::Agent {
+                target_pane_id: None,
+                ..
+            })
+        ));
+    }
+    let release = mouse_at(
+        &mut state,
+        MouseEventKind::Up(MouseButton::Left),
+        rows[2].x + 4,
+        rows[2].y,
+    );
+    assert_eq!(swap_request(&release), None);
+}
+
+/// the agents view is a priority queue, not the layout's order, so it has nothing to rearrange
+#[test]
+fn agent_rows_in_the_agents_view_do_not_drag() {
+    let projected = tree(vec![space(1, "one")], vec![pi(1, 1, 1), pi(2, 1, 1)]);
+    let mut state = shell(projected, Config::default());
+    state.sidebar_view = preferences::SidebarView::Agents;
+    state.compose(106, 20).expect("agents view");
+    let rows = agent_rows(&state);
+
+    click_at(&mut state, rows[0].x + 4, rows[0].y);
+    mouse_at(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        rows[1].x + 4,
+        rows[1].y,
+    );
+
+    assert!(state.chrome_drag.is_none());
+    assert!(state.agent_press.is_none());
 }

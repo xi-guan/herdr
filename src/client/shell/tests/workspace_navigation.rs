@@ -94,7 +94,7 @@ fn local_navigation_cursor_keeps_its_mark_with_terminal_theme() {
                     buffer[(rect.x, rect.y)].fg == palette.overlay1
                 } else {
                     let mark = &buffer[(rect.right() - 1, rect.y)];
-                    mark.symbol() == "┃" && mark.fg == palette.accent
+                    mark.symbol() == "┃" && mark.fg == palette.blue
                 }
             };
 

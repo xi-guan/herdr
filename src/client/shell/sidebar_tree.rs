@@ -718,8 +718,9 @@ pub(super) fn render_spaces_view(
             body.x,
             row,
             list_width,
-            &"─".repeat(list_width as usize),
-            Style::default().fg(palette.accent),
+            // heavy and blue: it lands on a rule, where a recoloured thin line barely shows
+            &"━".repeat(list_width as usize),
+            Style::default().fg(palette.blue),
         );
     }
 
@@ -792,7 +793,8 @@ fn render_space_rows(
                 // a space only carries the highlight when no agent row does, and is marked alike
                 if let Some(edge) = rect.right().checked_sub(SELECTION_MARK_WIDTH) {
                     buffer[(edge, y)].set_symbol(SELECTION_MARK);
-                    buffer[(edge, y)].set_style(Style::default().fg(palette.accent).bg(fill));
+                    // blue, not accent: a theme may darken accent for filled chips, and a thin glyph needs the lighter tier
+                    buffer[(edge, y)].set_style(Style::default().fg(palette.blue).bg(fill));
                 }
             }
         }
@@ -966,7 +968,12 @@ fn render_agent_rows(
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
         // overlay0 already sits near 3.4:1, and DIM on top of it lands near 1.4:1
-        let secondary_style = Style::default().fg(palette.overlay0);
+        // the focused row's fill is a faint wash, so its text has to carry the difference
+        let secondary_style = Style::default().fg(if is_active {
+            palette.text
+        } else {
+            palette.overlay0
+        });
         let bar = agent_bar_cells(agent.agent_status, config.status_indicators, rows.len());
         let bar_style = Style::default().fg(status_color(agent.agent_status, palette));
         let styles = RowStyles {
@@ -979,17 +986,35 @@ fn render_agent_rows(
             separator: tree_separator_style(palette),
         };
 
-        if is_active {
+        let dragged = state
+            .agent_swap
+            .is_some_and(|(source, _)| source == agent.pane_id);
+        let swap_target = state
+            .agent_swap
+            .is_some_and(|(_, target)| target == Some(agent.pane_id.as_str()));
+        // the tiers a dragged and a pointed-at space row use
+        let fill = if dragged {
+            Some(palette.surface1)
+        } else if swap_target {
+            Some(palette.surface0)
+        } else {
+            is_active.then_some(palette.surface_dim)
+        };
+        if let Some(fill) = fill {
             for y in rect.y..rect.bottom().min(list_bottom) {
                 // the margin and the mark's column stay out: the fill runs from the content to the accent
                 let fill_end = rect.right().saturating_sub(SELECTION_MARK_WIDTH);
                 for x in rect.x.saturating_add(ROW_INDENT)..fill_end {
-                    buffer[(x, y)].set_style(Style::default().bg(palette.surface_dim));
+                    buffer[(x, y)].set_style(Style::default().bg(fill));
                 }
-                if let Some(edge) = rect.right().checked_sub(SELECTION_MARK_WIDTH) {
+                if let Some(edge) = rect
+                    .right()
+                    .checked_sub(SELECTION_MARK_WIDTH)
+                    .filter(|_| is_active || swap_target)
+                {
                     buffer[(edge, y)].set_symbol(SELECTION_MARK);
                     // the glyph's colour only, or a block would print beside the panel edge
-                    buffer[(edge, y)].set_fg(palette.accent);
+                    buffer[(edge, y)].set_fg(palette.blue);
                 }
             }
         }
