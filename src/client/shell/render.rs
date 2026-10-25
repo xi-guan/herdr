@@ -248,6 +248,8 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    /// the dragged agent row's pane, and the one it would trade places with
+    pub(super) agent_swap: Option<(&'a str, Option<&'a str>)>,
     pub(super) navigating: bool,
     pub(super) sidebar_view: super::preferences::SidebarView,
     pub(super) pending_tree_reveal: &'a mut Option<TreeReveal>,

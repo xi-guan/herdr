@@ -579,7 +579,14 @@ impl ClientShellState {
                     .get(entry.index)
                     .map(|workspace| workspace.workspace_id.clone())
             });
-            let row = last_hit.rect.bottom();
+            // the tree hangs a space's agents under it, so the list ends below the last of them
+            let row = self
+                .hits
+                .agents
+                .iter()
+                .fold(last_hit.rect.bottom(), |row, (rect, _)| {
+                    row.max(rect.bottom())
+                });
             if row < self.hits.new_workspace.y {
                 slots.push((before, row));
             }
@@ -589,6 +596,26 @@ impl ClientShellState {
             .enumerate()
             .min_by_key(|(index, (_, row))| (point.1.abs_diff(*row), *index))
             .map(|(_, target)| target)
+    }
+
+    /// the agent row under the point that the source can trade places with: a swap stays in one tab.
+    fn agent_swap_target_at(&self, source_pane_id: &str, point: (u16, u16)) -> Option<String> {
+        let snapshot = self.snapshot.as_deref()?;
+        let tab_of = |pane_id: &str| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)
+                .map(|agent| (agent.workspace_id.as_str(), agent.tab_id.as_str()))
+        };
+        let source_tab = tab_of(source_pane_id)?;
+        self.hits
+            .agents
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .map(|(_, pane_id)| pane_id)
+            .filter(|pane_id| *pane_id != source_pane_id && tab_of(pane_id) == Some(source_tab))
+            .cloned()
     }
 
     fn workspace_move_method(
@@ -1222,7 +1249,33 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                Some(ClientChromeDrag::Agent { source_pane_id, .. }) => {
+                    let target = self.agent_swap_target_at(source_pane_id, point);
+                    if let Some(ClientChromeDrag::Agent { target_pane_id, .. }) =
+                        self.chrome_drag.as_mut()
+                    {
+                        *target_pane_id = target;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 None => {}
+            }
+            if let Some(press) = self.agent_press.as_ref() {
+                let delta = mouse
+                    .column
+                    .abs_diff(press.start_column)
+                    .max(mouse.row.abs_diff(press.start_row));
+                if delta >= 1 {
+                    let source_pane_id = press.pane_id.clone();
+                    let target_pane_id = self.agent_swap_target_at(&source_pane_id, point);
+                    self.chrome_drag = Some(ClientChromeDrag::Agent {
+                        source_pane_id,
+                        target_pane_id,
+                    });
+                    outcome.repaint = true;
+                }
+                return;
             }
             if let Some(press) = self.workspace_press.as_ref() {
                 let delta = mouse
@@ -1266,6 +1319,7 @@ impl ClientShellState {
             if let Some(drag) = self.chrome_drag.take() {
                 self.workspace_press = None;
                 self.tab_press = None;
+                self.agent_press = None;
                 match drag {
                     ClientChromeDrag::Tab {
                         tab_id,
@@ -1311,6 +1365,24 @@ impl ClientShellState {
                             ) {
                                 self.push_endpoint_method(method, outcome);
                             }
+                        }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::Agent { source_pane_id, .. } => {
+                        if let Some(target_pane_id) =
+                            self.agent_swap_target_at(&source_pane_id, point)
+                        {
+                            self.push_endpoint_method(
+                                crate::api::schema::Method::PaneSwap(
+                                    crate::api::schema::PaneSwapParams {
+                                        pane_id: None,
+                                        direction: None,
+                                        source_pane_id: Some(source_pane_id),
+                                        target_pane_id: Some(target_pane_id),
+                                    },
+                                ),
+                                outcome,
+                            );
                         }
                         outcome.repaint = true;
                     }
@@ -1376,6 +1448,8 @@ impl ClientShellState {
                 }
                 return;
             }
+            // the press already focused its pane on the way down, so a click leaves nothing to do
+            self.agent_press = None;
             if let Some(press) = self.workspace_press.take() {
                 self.finish_endpoint_workspace_press(press, outcome);
                 return;
@@ -1957,6 +2031,7 @@ impl ClientShellState {
                 let previous_pane_click = self.last_pane_click.take();
                 self.workspace_press = None;
                 self.tab_press = None;
+                self.agent_press = None;
                 self.chrome_drag = None;
                 // The toggle is painted over the agent scrollbar's last cell.
                 if super::contains(self.hits.sidebar_toggle, point) {
@@ -2202,6 +2277,16 @@ impl ClientShellState {
                         outcome.repaint = true;
                     }
                     self.reveal_agent_in_tree(&pane_id);
+                    // only the tree lists agents in layout order; the agents view is a queue
+                    if self.sidebar_view == super::preferences::SidebarView::Spaces
+                        && !self.sidebar_collapsed
+                    {
+                        self.agent_press = Some(ClientAgentPress {
+                            pane_id: pane_id.clone(),
+                            start_column: mouse.column,
+                            start_row: mouse.row,
+                        });
+                    }
                     self.push_endpoint_method(
                         crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
                             pane_id,
