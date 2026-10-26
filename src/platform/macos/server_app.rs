@@ -16,7 +16,7 @@ pub(super) fn daemon_command(command: &Command) -> io::Result<Command> {
     // Keep the installed helper across CLI updates: replacing its ad hoc
     // signature invalidates privacy grants. Change this version only when
     // updating the helper itself, with a documented permission migration.
-    let app = root.join("server-app-v1/Herdr Server.app");
+    let app = root.join("server-app-v1/herdr-server.app");
     ensure_app(&app)?;
     register_app(&app)?;
     let mut wrapped = wrap_command(command, &app.join(EXECUTABLE));
@@ -69,7 +69,7 @@ fn ensure_app(app: &Path) -> io::Result<()> {
         .mode(0o700)
         .create(parent)?;
     let staging = super::launchd_spawn::PrivateDir::create_in(parent)?;
-    let staged_app = staging.path().join("Herdr Server.app");
+    let staged_app = staging.path().join("herdr-server.app");
     std::fs::create_dir_all(staged_app.join("Contents/MacOS"))?;
     std::fs::write(staged_app.join("Contents/Info.plist"), PLIST)?;
     let mut executable = std::fs::OpenOptions::new()
@@ -85,7 +85,7 @@ fn ensure_app(app: &Path) -> io::Result<()> {
         .output()?;
     if !status.status.success() {
         return Err(io::Error::other(format!(
-            "could not sign Herdr Server.app: {}",
+            "could not sign herdr-server.app: {}",
             String::from_utf8_lossy(&status.stderr)
         )));
     }
