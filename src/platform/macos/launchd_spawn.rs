@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn app_jobs_are_associated_with_the_responsible_bundle() {
-        let command = Command::new("/data/Herdr Server.app/Contents/MacOS/herdr-server-launcher");
+        let command = Command::new("/data/herdr-server.app/Contents/MacOS/herdr-server-launcher");
         let plist = job_plist("dev.herdr.server.1.2", &command, None, 0o022).unwrap();
         assert!(plist.contains("<key>AssociatedBundleIdentifiers</key>\n<array>\n<string>dev.herdr.server</string>\n</array>"));
         let plain = job_plist(

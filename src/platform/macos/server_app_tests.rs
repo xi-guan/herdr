@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 fn test_app() -> (super::super::launchd_spawn::PrivateDir, PathBuf) {
     let dir = super::super::launchd_spawn::PrivateDir::create_in(&std::env::temp_dir()).unwrap();
-    let app = dir.path().join("Herdr Server.app");
+    let app = dir.path().join("herdr-server.app");
     ensure_app(&app).unwrap();
     (dir, app)
 }

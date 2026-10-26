@@ -5,7 +5,7 @@
     <key>CFBundleIdentifier</key>
     <string>dev.herdr.server</string>
     <key>CFBundleName</key>
-    <string>Herdr Server</string>
+    <string>herdr-server</string>
     <key>CFBundleExecutable</key>
     <string>herdr-server-launcher</string>
     <key>CFBundlePackageType</key>
