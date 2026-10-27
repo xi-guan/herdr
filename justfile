@@ -325,13 +325,34 @@ uninstall:
     rm -rf target
     echo "removed installed binary and target/"
 
-# Free disk space: the debug build output and archived binaries picked with fzf
+# Free disk space: the debug build output, plus worktrees and archived binaries picked with fzf
 clean:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -d target/debug ]; then
         read -r -p "remove target/debug ($(du -sh target/debug | cut -f1))? [y/N] " reply
         case "$reply" in [yY]*) cargo clean --profile dev ;; *) echo "kept target/debug" ;; esac
+    fi
+    # first entry is the main checkout; the current tree is skipped so we never remove our own cwd
+    here=$(git rev-parse --show-toplevel)
+    worktrees=$(git worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 | grep -vxF "$here" || true)
+    if [ -n "$worktrees" ]; then
+        command -v fzf >/dev/null || { echo "fzf not found, install it to prune worktrees: brew install fzf"; exit 1; }
+        picked=$(while IFS= read -r wt; do printf '%s\t%s\t%s\n' "$(du -sh "$wt" | cut -f1)" "$wt" "$(git -C "$wt" branch --show-current)"; done <<< "$worktrees" | fzf --multi) || picked=""
+        if [ -n "$picked" ]; then
+            echo "$picked"
+            read -r -p "remove these worktrees and their branches? [y/N] " reply
+            case "$reply" in
+                [yY]*)
+                    # git refuses dirty worktrees and unmerged branches, so unsaved work survives a wrong pick
+                    while IFS=$'\t' read -r _ wt branch; do
+                        git worktree remove "$wt" || { echo "kept $wt"; continue; }
+                        [ -z "$branch" ] || git branch -d "$branch" || echo "kept branch $branch"
+                    done <<< "$picked"
+                    ;;
+                *) echo "kept worktrees" ;;
+            esac
+        fi
     fi
     archive="$HOME/.local/share/herdr-versions"
     [ -n "$(ls -A "$archive" 2>/dev/null)" ] || exit 0
