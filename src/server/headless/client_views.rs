@@ -718,10 +718,42 @@ impl HeadlessServer {
         let Some(tab_id) = self.shell_tab_id_for_client(client_id) else {
             return false;
         };
-        if self.tab_geometry_controllers.insert(tab_id, client_id) == Some(client_id) {
+        let already_controller =
+            self.tab_geometry_controllers.insert(tab_id, client_id) == Some(client_id);
+        // only a focused shell takes panes back, so the attach window keeps them while in front
+        let released = self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| client.outer_terminal_focus == Some(true))
+            && self.release_attach_locks_to(client_id);
+        if already_controller && !released {
             return false;
         }
         self.apply_shell_tab_geometry(client_id, start_pending_agent_resumes)
+    }
+
+    fn release_attach_locks_to(&mut self, client_id: u64) -> bool {
+        let viewed = self.shell_target_for_client(client_id);
+        let released = self
+            .terminal_attach_owners
+            .keys()
+            .filter(|terminal_id| {
+                self.shell_geometry_controller_for_terminal(terminal_id)
+                    .is_some_and(|(controller_id, target)| {
+                        controller_id == client_id && Some(target) == viewed
+                    })
+            })
+            .filter_map(|terminal_id| self.terminal_id_by_string(terminal_id))
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for terminal_id in released {
+            changed |= self
+                .app
+                .state
+                .direct_attach_resize_locks
+                .remove(&terminal_id);
+        }
+        changed
     }
 
     pub(super) fn claim_unowned_shell_tab_geometry(

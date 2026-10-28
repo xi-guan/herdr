@@ -1045,12 +1045,68 @@ impl HeadlessServer {
             };
             self.shell_geometry_controller_for_terminal(terminal_id)
         });
+        let shell_client = self
+            .clients
+            .get(&client_id)
+            .is_some_and(ClientConnection::is_shell_client);
         self.remove_client(client_id);
         if let Some((controller_id, target)) = restore_shell_controller {
             self.restore_shell_tab_geometry(controller_id, target);
         } else {
             self.resize_tabs_for_only_shell_client(true);
         }
+        if shell_client {
+            self.relock_unviewed_attach_terminals();
+        }
+    }
+
+    // with no shell showing a pane it took over, nothing else would give it back to its attach client
+    fn relock_unviewed_attach_terminals(&mut self) {
+        let owners = self
+            .terminal_attach_owners
+            .iter()
+            .filter(|(terminal_id, _)| {
+                self.terminal_id_by_string(terminal_id)
+                    .is_some_and(|terminal_id| {
+                        !self
+                            .app
+                            .state
+                            .direct_attach_resize_locks
+                            .contains(&terminal_id)
+                    })
+                    && !self
+                        .shell_geometry_controller_for_terminal(terminal_id)
+                        .is_some_and(|(controller_id, target)| {
+                            self.shell_target_for_client(controller_id) == Some(target)
+                        })
+            })
+            .map(|(_, &owner_id)| owner_id)
+            .collect::<Vec<_>>();
+        for owner_id in owners {
+            self.lock_terminal_attach_size(owner_id);
+        }
+    }
+
+    fn lock_terminal_attach_size(&mut self, client_id: u64) -> bool {
+        let Some(client) = self.clients.get(&client_id) else {
+            return false;
+        };
+        let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode else {
+            return false;
+        };
+        let (cols, rows) = client.terminal_size;
+        let cell_size = client.cell_size;
+        let Some(terminal_id) = self.terminal_id_by_string(terminal_id) else {
+            return false;
+        };
+        self.app
+            .state
+            .direct_attach_resize_locks
+            .insert(terminal_id.clone());
+        if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
+            runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+        }
+        true
     }
 
     /// Accepts pending client connections from the non-blocking listener.
@@ -2209,7 +2265,17 @@ impl HeadlessServer {
                     None
                 };
                 if let Some((terminal_id, cell_size)) = direct_terminal_id {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                    // while a shell client holds the pane, the size waits for this client's focus
+                    if let Some(runtime) = self
+                        .terminal_id_by_string(&terminal_id)
+                        .filter(|terminal_id| {
+                            self.app
+                                .state
+                                .direct_attach_resize_locks
+                                .contains(terminal_id)
+                        })
+                        .and_then(|terminal_id| self.app.terminal_runtimes.get(&terminal_id))
+                    {
                         runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
                     }
                     return true;
@@ -2293,6 +2359,10 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get(&client_id) else {
                     return false;
                 };
+                if matches!(client.mode, ClientConnectionMode::TerminalAttach { .. }) {
+                    // the window in front gets the pane's full size; losing focus keeps it
+                    return focused && self.lock_terminal_attach_size(client_id);
+                }
                 if !client.is_active_shell_client() || client.outer_terminal_focus == Some(focused)
                 {
                     return false;
