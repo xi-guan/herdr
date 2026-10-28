@@ -789,6 +789,47 @@ fn session_snapshot_request_and_response_round_trip() {
 }
 
 #[test]
+fn claude_usage_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_usage".into(),
+        method: Method::ClaudeUsage(EmptyParams::default()),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"method\":\"claude.usage\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = SuccessResponse {
+        id: "req_usage".into(),
+        result: ResponseResult::ClaudeUsage {
+            windows: vec![ClaudeUsageWindowInfo {
+                label: "five_hour".into(),
+                percent: 42,
+                resets_at: Some(4_000_000_000),
+            }],
+            seven_day_tokens: Some(31_000_000),
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"claude_usage\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+
+    // no reading yet still names both fields, so a caller can tell "nothing" from "unsupported"
+    let empty = SuccessResponse {
+        id: "req_usage".into(),
+        result: ResponseResult::ClaudeUsage {
+            windows: Vec::new(),
+            seven_day_tokens: None,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&empty).unwrap()["result"],
+        serde_json::json!({ "type": "claude_usage", "windows": [], "seven_day_tokens": null })
+    );
+}
+
+#[test]
 fn worktree_request_and_response_round_trip() {
     let request = Request {
         id: "req_worktree".into(),

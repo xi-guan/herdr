@@ -277,6 +277,10 @@ pub enum ResponseResult {
         active: bool,
         projection_revision: u64,
     },
+    ClaudeUsage {
+        windows: Vec<ClaudeUsageWindowInfo>,
+        seven_day_tokens: Option<u64>,
+    },
     Ok {},
 }
 
@@ -298,4 +302,12 @@ pub struct AgentManifestInfo {
     pub remote_last_checked_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClaudeUsageWindowInfo {
+    pub label: String,
+    pub percent: u8,
+    /// unix seconds, so the caller derives the countdown itself
+    pub resets_at: Option<i64>,
 }

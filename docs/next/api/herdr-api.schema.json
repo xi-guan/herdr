@@ -6394,6 +6394,22 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "claude.usage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -6883,6 +6899,32 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "ClaudeUsageWindowInfo": {
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "percent": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "resets_at": {
+              "description": "unix seconds, so the caller derives the countdown itself",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "percent"
+          ],
+          "type": "object"
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -10509,6 +10551,33 @@
                 "type",
                 "active",
                 "projection_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "seven_day_tokens": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "claude_usage",
+                  "type": "string"
+                },
+                "windows": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClaudeUsageWindowInfo"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "windows"
               ],
               "type": "object"
             },
