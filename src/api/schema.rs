@@ -147,6 +147,7 @@ operations::define_operations! {
     PluginPaneOpen(PluginPaneOpenParams) => "plugin.pane.open", true, false;
     PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
     PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
+    ClaudeUsage(EmptyParams) => "claude.usage", false, false;
     // never on the wire: a socket client cannot name it and the schema omits it
     @internal PaneContentRevisions(PaneContentRevisionsParams) => "pane.content_revisions";
 }

@@ -1272,6 +1272,24 @@ impl App {
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
             }
+            // stored values only, as in the client-shell snapshot; no reading yet is empty, not an error
+            Method::ClaudeUsage(_) => SuccessResponse {
+                id: request.id,
+                result: ResponseResult::ClaudeUsage {
+                    windows: self
+                        .state
+                        .claude_usage
+                        .iter()
+                        .flat_map(|usage| &usage.windows)
+                        .map(|window| crate::api::schema::ClaudeUsageWindowInfo {
+                            label: window.label.clone(),
+                            percent: window.percent,
+                            resets_at: window.resets_at,
+                        })
+                        .collect(),
+                    seven_day_tokens: self.state.claude_seven_day_tokens,
+                },
+            },
             _ => {
                 return responses::encode_error(
                     request.id,
@@ -1684,6 +1702,64 @@ mod tests {
             .await
             .is_err(),
             "status request should not reset detection runtimes"
+        );
+    }
+
+    #[test]
+    fn claude_usage_reports_the_stored_reading_and_is_empty_before_one_lands() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let request = |app: &mut App, id: &str| {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: id.into(),
+                method: crate::api::schema::Method::ClaudeUsage(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            });
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()
+        };
+
+        let empty = request(&mut app, "before");
+        assert_eq!(
+            empty,
+            serde_json::json!({
+                "id": "before",
+                "result": { "type": "claude_usage", "windows": [], "seven_day_tokens": null }
+            })
+        );
+
+        app.state.claude_usage = Some(crate::usage::ClaudeUsage {
+            windows: vec![
+                crate::usage::UsageWindow {
+                    label: "five_hour".into(),
+                    percent: 42,
+                    resets_at: Some(4_000_000_000),
+                },
+                crate::usage::UsageWindow {
+                    label: "seven_day".into(),
+                    percent: 7,
+                    resets_at: None,
+                },
+            ],
+        });
+        app.state.claude_seven_day_tokens = Some(31_000_000);
+        let stored = request(&mut app, "after");
+        assert_eq!(
+            stored["result"],
+            serde_json::json!({
+                "type": "claude_usage",
+                "windows": [
+                    { "label": "five_hour", "percent": 42, "resets_at": 4_000_000_000_i64 },
+                    { "label": "seven_day", "percent": 7, "resets_at": null },
+                ],
+                "seven_day_tokens": 31_000_000,
+            })
         );
     }
 
