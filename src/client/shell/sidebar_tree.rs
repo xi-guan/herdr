@@ -998,7 +998,7 @@ fn render_agent_rows(
         } else if swap_target {
             Some(palette.surface0)
         } else {
-            is_active.then_some(palette.surface_dim)
+            is_active.then_some(palette.active_row_bg)
         };
         if let Some(fill) = fill {
             for y in rect.y..rect.bottom().min(list_bottom) {
