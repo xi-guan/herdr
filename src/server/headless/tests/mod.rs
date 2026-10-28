@@ -4615,6 +4615,215 @@ fn terminal_attach_disconnect_restores_client_shell_pane_size() {
     rt.shutdown_timeout(Duration::from_millis(100));
 }
 
+fn with_client_shell_and_attached_pane(
+    test: impl FnOnce(&mut HeadlessServer, crate::terminal::TerminalId, String, (u16, u16)),
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("test");
+    let second_tab = workspace.test_add_tab(Some("second"));
+    let pane_id = workspace.tabs[0].root_pane;
+    let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    let second_tab_id = server
+        .app
+        .public_tab_id(0, second_tab)
+        .expect("second tab id");
+    server.app.terminal_runtimes.insert(
+        terminal_id.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+    );
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.sync_foreground_client_state();
+    server.reconcile_client_shell_locations();
+    assert!(server.claim_unowned_shell_tab_geometry(1, true));
+    let shell_size = attached_pane_size(&server, &terminal_id);
+    assert_ne!(shell_size, (30, 100));
+
+    connect_pending_terminal_client(&mut server, 2);
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 2,
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        })
+    );
+    assert!(attached_pane_locked(&server, &terminal_id));
+    assert_eq!(attached_pane_size(&server, &terminal_id), (30, 100));
+
+    test(&mut server, terminal_id, second_tab_id, shell_size);
+
+    drop(server);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+fn attached_pane_size(
+    server: &HeadlessServer,
+    terminal_id: &crate::terminal::TerminalId,
+) -> (u16, u16) {
+    server
+        .app
+        .terminal_runtimes
+        .get(terminal_id)
+        .expect("runtime")
+        .current_size()
+}
+
+fn attached_pane_locked(
+    server: &HeadlessServer,
+    terminal_id: &crate::terminal::TerminalId,
+) -> bool {
+    server
+        .app
+        .state
+        .direct_attach_resize_locks
+        .contains(terminal_id)
+}
+
+fn send_focus(server: &mut HeadlessServer, client_id: u64, focused: bool) -> bool {
+    server.handle_server_event(ServerEvent::ClientShellFocus { client_id, focused })
+}
+
+fn resize_attach_client(server: &mut HeadlessServer, client_id: u64, cols: u16, rows: u16) {
+    assert!(server.handle_server_event(ServerEvent::ClientResize {
+        client_id,
+        cols,
+        rows,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+    }));
+}
+
+#[test]
+fn client_shell_focus_takes_attached_pane_on_its_tab() {
+    with_client_shell_and_attached_pane(|server, terminal_id, _second_tab_id, shell_size| {
+        assert!(send_focus(server, 1, true));
+
+        assert!(!attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), shell_size);
+    });
+}
+
+#[test]
+fn client_shell_focus_on_another_tab_keeps_attached_pane() {
+    with_client_shell_and_attached_pane(|server, terminal_id, second_tab_id, _shell_size| {
+        server.clients.insert(
+            3,
+            ClientConnection::new(
+                (90, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                3,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.reconcile_client_shell_locations();
+        assert!(server.focus_shell_client_on_tab(3, &second_tab_id));
+        assert!(send_focus(server, 3, true));
+        assert!(attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), (30, 100));
+
+        // still the pane tab's geometry controller, but no longer viewing it
+        assert!(server.focus_shell_client_on_tab(1, &second_tab_id));
+        assert!(send_focus(server, 1, true));
+        assert!(attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), (30, 100));
+    });
+}
+
+#[test]
+fn terminal_attach_focus_relocks_at_last_resize() {
+    with_client_shell_and_attached_pane(|server, terminal_id, _second_tab_id, shell_size| {
+        assert!(send_focus(server, 1, true));
+        resize_attach_client(server, 2, 90, 20);
+        assert_eq!(attached_pane_size(server, &terminal_id), shell_size);
+
+        assert!(send_focus(server, 2, true));
+        assert!(attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), (20, 90));
+
+        assert!(!send_focus(server, 2, false));
+        assert!(attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), (20, 90));
+    });
+}
+
+#[test]
+fn terminal_attach_resize_waits_while_client_shell_holds_pane() {
+    with_client_shell_and_attached_pane(|server, terminal_id, _second_tab_id, shell_size| {
+        assert!(send_focus(server, 1, true));
+        resize_attach_client(server, 2, 90, 20);
+
+        assert!(!attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), shell_size);
+        assert_eq!(server.clients[&2].terminal_size, (90, 20));
+    });
+}
+
+#[test]
+fn client_shell_disconnect_relocks_attached_pane() {
+    with_client_shell_and_attached_pane(|server, terminal_id, _second_tab_id, _shell_size| {
+        assert!(send_focus(server, 1, true));
+        resize_attach_client(server, 2, 90, 20);
+
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 1 }));
+        assert!(attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), (20, 90));
+    });
+}
+
+#[test]
+fn terminal_observe_focus_leaves_attached_pane_alone() {
+    with_client_shell_and_attached_pane(|server, terminal_id, _second_tab_id, shell_size| {
+        connect_pending_terminal_client(server, 3);
+        assert!(
+            server.handle_server_event(ServerEvent::ClientObserveTerminal {
+                client_id: 3,
+                target: terminal_id.to_string(),
+            })
+        );
+        assert!(send_focus(server, 1, true));
+
+        assert!(!send_focus(server, 3, true));
+        assert!(!attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), shell_size);
+    });
+}
+
+#[test]
+fn focused_client_shell_switching_to_attached_tab_takes_pane() {
+    with_client_shell_and_attached_pane(|server, terminal_id, second_tab_id, shell_size| {
+        let first_tab_id = server.shell_tab_id_for_client(1).expect("first tab id");
+        assert!(server.focus_shell_client_on_tab(1, &second_tab_id));
+        assert!(send_focus(server, 1, true));
+        assert!(attached_pane_locked(server, &terminal_id));
+
+        assert!(server.focus_shell_client_on_tab(1, &first_tab_id));
+        assert!(server.claim_shell_tab_geometry(1, false));
+        assert!(!attached_pane_locked(server, &terminal_id));
+        assert_eq!(attached_pane_size(server, &terminal_id), shell_size);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn backpressured_observer_skips_runtime_access_and_recovers_without_new_output() {
@@ -6488,7 +6697,7 @@ async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_
 
 #[test]
 fn terminal_attach_resize_uses_known_cell_geometry_without_pixel_mouse() {
-    with_terminal_session_test_server(|server, _other_terminal_id, terminal_id, _pane_id| {
+    with_terminal_session_test_server(|server, runtime_terminal_id, terminal_id, _pane_id| {
         let mut client = ClientConnection::new(
             (80, 24),
             crate::kitty_graphics::HostCellSize::default(),
@@ -6500,6 +6709,11 @@ fn terminal_attach_resize_uses_known_cell_geometry_without_pixel_mouse() {
             terminal_id: terminal_id.clone(),
         };
         server.clients.insert(1, client);
+        server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .insert(runtime_terminal_id);
 
         assert!(server.handle_server_event(ServerEvent::ClientResize {
             client_id: 1,
