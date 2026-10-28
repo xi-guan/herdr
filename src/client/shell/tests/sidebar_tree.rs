@@ -813,7 +813,7 @@ fn active_space_row_yields_its_fill_to_the_focused_agent_row() {
     let space = style_at(&frame, find_symbol_x(&frame, space_row, 25, "o"), space_row);
     assert_eq!(space.bg, Some(ratatui::style::Color::Reset));
     let agent = style_at(&frame, find_symbol_x(&frame, agent_row, 25, "p"), agent_row);
-    assert_eq!(agent.bg, Some(state.config.palette.surface_dim));
+    assert_eq!(agent.bg, Some(state.config.palette.active_row_bg));
 }
 
 /// the fill alone is a faint wash, so the focused row also lifts its text and marks its edge in blue
