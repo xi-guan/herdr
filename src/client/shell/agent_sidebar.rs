@@ -444,7 +444,7 @@ fn resolve_agent_row(
                 .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
             agent_label,
             terminal_title: agent.terminal_title.as_deref(),
-            terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
+            terminal_title_stripped: agent_title_stripped(agent),
             canonical_agent,
             tokens: &tokens,
         },
@@ -523,6 +523,14 @@ fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: 
 
 fn display_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// a title the agent reported outranks its terminal title, as it does on the pane border.
+pub(super) fn agent_title_stripped(agent: &crate::protocol::ClientShellAgent) -> Option<&str> {
+    agent
+        .title
+        .as_deref()
+        .or(agent.terminal_title_stripped.as_deref())
 }
 
 pub(super) fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {

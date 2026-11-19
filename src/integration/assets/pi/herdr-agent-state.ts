@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=9
+// HERDR_INTEGRATION_VERSION=10
 // @ts-nocheck
 
 import net from "node:net";
@@ -146,6 +146,49 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
   });
 }
 
+function sendTitle(title: string | undefined): Promise<void> {
+  const field = title === undefined ? { clear_title: true } : { title };
+  return sendRequest({
+    id: `${source}:title:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.report_metadata",
+    params: { pane_id: paneId, source, agent: "pi", ...field, seq: nextReportSeq() },
+  });
+}
+
+function userMessageText(message: any): string | undefined {
+  if (message?.role !== "user") {
+    return undefined;
+  }
+  const content = message.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((part) => part?.type === "text" && typeof part.text === "string")
+            .map((part) => part.text)
+            .join(" ")
+        : "";
+  return text.replace(/\s+/g, " ").trim() || undefined;
+}
+
+// the same first message pi's /resume list shows, read across every branch
+function firstUserMessage(ctx: any): string | undefined {
+  try {
+    for (const entry of ctx?.sessionManager?.getEntries?.() ?? []) {
+      const text = entry?.type === "message" ? userMessageText(entry.message) : undefined;
+      if (text) {
+        return text;
+      }
+    }
+  } catch {}
+  return undefined;
+}
+
+function sessionName(name: unknown): string | undefined {
+  return typeof name === "string" ? name.trim() || undefined : undefined;
+}
+
 let sendInFlight = false;
 let queuedState: QueuedState | undefined;
 
@@ -187,10 +230,27 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
+  let uiPromptActive = false;
+  let uiPromptTitle: string | undefined;
+  let name: string | undefined;
+  let firstMessage: string | undefined;
+  let reportedTitle: string | undefined;
+
+  function publishTitle(force = false) {
+    const title = name ?? firstMessage;
+    if (!force && title === reportedTitle) {
+      return;
+    }
+    reportedTitle = title;
+    void sendTitle(title);
+  }
 
   function desiredState() {
     if (blockedCount > 0) {
       return { state: "blocked" as const, message: blockedMessage };
+    }
+    if (uiPromptActive) {
+      return { state: "blocked" as const, message: uiPromptTitle };
     }
     if (agentActive) {
       return { state: "working" as const, message: undefined };
@@ -226,6 +286,25 @@ export default function (pi) {
     publishState();
   });
 
+  // pi coalesces nested ctx.ui prompts into one start/end span, so a flag is enough.
+  pi.on("ui_prompt_start", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    uiPromptActive = true;
+    uiPromptTitle = typeof event?.title === "string" ? event.title : undefined;
+    publishState();
+  });
+
+  pi.on("ui_prompt_end", () => {
+    if (!rootSession) {
+      return;
+    }
+    uiPromptActive = false;
+    uiPromptTitle = undefined;
+    publishState();
+  });
+
   pi.on("session_start", async (event, ctx) => {
     // TUI only: RPC/JSON/print modes are headless (no PTY herdr can display),
     // and RPC still reports hasUI=true, so mode is the reliable gate.
@@ -235,9 +314,33 @@ export default function (pi) {
     rootSession = true;
     updateSessionRef(ctx);
     await reportSession(event?.reason);
+    try {
+      name = sessionName(ctx?.sessionManager?.getSessionName?.());
+    } catch {
+      name = undefined;
+    }
+    firstMessage = firstUserMessage(ctx);
+    // herdr drops the title when pi exits, but a replaced session's title may outlive its extension instance
+    publishTitle(event?.reason !== "startup");
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
+  });
+
+  pi.on("message_end", (event) => {
+    if (!rootSession || firstMessage) {
+      return;
+    }
+    firstMessage = userMessageText(event?.message);
+    publishTitle();
+  });
+
+  pi.on("session_info_changed", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    name = sessionName(event?.name);
+    publishTitle();
   });
 
   pi.on("agent_start", (_event, ctx) => {

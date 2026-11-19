@@ -355,7 +355,7 @@ fn nested_agent_tokens(
                 .or(agent.agent.as_deref())
                 .or(agent.title.as_deref()),
             terminal_title: agent.terminal_title.as_deref(),
-            terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
+            terminal_title_stripped: super::agent_sidebar::agent_title_stripped(agent),
             canonical_agent: agent
                 .agent
                 .as_deref()

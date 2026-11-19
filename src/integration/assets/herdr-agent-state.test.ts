@@ -370,6 +370,74 @@ test("Pi settlement preserves explicit blocked-state precedence", async () => {
   expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
 });
 
+test("Pi reports blocked while a ui prompt waits for the user", async () => {
+  const requests = await startRecordingServer("pi-ui-prompt");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 2);
+
+  handlers.get("ui_prompt_start")?.({ reason: "ui_prompt", kind: "confirm", title: "agent-guard" }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestMessage(requests.at(-1))).toBe("agent-guard");
+
+  handlers.get("ui_prompt_end")?.({ reason: "ui_prompt", kind: "confirm", title: "agent-guard" }, context);
+  await waitFor(() => requestStates(requests).length === 4);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "working"]);
+});
+
+test("Pi reports the session name, else the first user message, as the pane title", async () => {
+  const requests = await startRecordingServer("pi-title");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let sessionName: string | undefined;
+  const entries: unknown[] = [];
+  const context = {
+    ...piContext(() => true),
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+      getSessionName: () => sessionName,
+      getEntries: () => entries,
+    },
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  expect(requestTitles(requests)).toEqual([]);
+
+  const first = { role: "user", content: [{ type: "text", text: "fix the\npi   notifications" }] };
+  entries.push({ type: "message", message: first });
+  handlers.get("message_end")?.({ message: first }, context);
+  await waitFor(() => requestTitles(requests).length === 1);
+
+  const second = { role: "user", content: "later prompt" };
+  entries.push({ type: "message", message: second });
+  handlers.get("message_end")?.({ message: second }, context);
+  sessionName = "named";
+  handlers.get("session_info_changed")?.({ name: "named" }, context);
+  await waitFor(() => requestTitles(requests).length === 2);
+
+  sessionName = undefined;
+  handlers.get("session_info_changed")?.({ name: undefined }, context);
+  await waitFor(() => requestTitles(requests).length === 3);
+  expect(requestTitles(requests)).toEqual(["fix the pi notifications", "named", "fix the pi notifications"]);
+
+  entries.length = 0;
+  // the new session has no title yet, so the old one is cleared
+  await handlers.get("session_start")?.({ reason: "new" }, context);
+  await waitFor(() => requestTitles(requests).length === 4);
+  expect(requestTitles(requests).at(-1)).toBe(null);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();
@@ -475,10 +543,10 @@ test("Pi waits for a replacement session report before publishing state", async 
   ) {
     await Bun.sleep(5);
   }
-  expect(requests.map((request) => (isRecord(request) ? request.method : undefined))).toEqual([
-    "pane.report_agent_session",
-    "pane.report_agent",
-  ]);
+  const stateMethods = requests
+    .map((request) => (isRecord(request) ? request.method : undefined))
+    .filter((method) => method !== "pane.report_metadata");
+  expect(stateMethods).toEqual(["pane.report_agent_session", "pane.report_agent"]);
 });
 
 async function startDroppedFirstResponseServer(name: string) {
@@ -670,6 +738,23 @@ function requestState(request: unknown): unknown {
     return undefined;
   }
   return request.params.state;
+}
+
+// a cleared title reads as null
+function requestTitles(requests: unknown[]): unknown[] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === "pane.report_metadata")
+    .map((request) => {
+      const params = isRecord(request) && isRecord(request.params) ? request.params : {};
+      return params.clear_title === true ? null : params.title;
+    });
+}
+
+function requestMessage(request: unknown): unknown {
+  if (!isRecord(request) || !isRecord(request.params)) {
+    return undefined;
+  }
+  return request.params.message;
 }
 
 function requestSessionPath(request: unknown): unknown {
