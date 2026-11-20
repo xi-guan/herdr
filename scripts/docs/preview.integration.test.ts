@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 
 const script = resolve(import.meta.dir, 'preview.mjs');
 const temporaryDirectories: string[] = [];
@@ -56,6 +56,8 @@ async function fixture() {
   git(root, ['init', '-q']);
   git(root, ['config', 'user.email', 'test@example.com']);
   git(root, ['config', 'user.name', 'Test']);
+  // a global ignore like **/docs/ would keep the fixture's docs out of commits
+  git(root, ['config', 'core.excludesFile', devNull]);
   git(root, ['add', '.']);
   git(root, ['commit', '-qm', 'preview fixture']);
   return root;

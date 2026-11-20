@@ -19,6 +19,8 @@ class ReleaseTests(unittest.TestCase):
         self.git("init", "-q", "-b", "master")
         self.git("config", "user.name", "Release Test")
         self.git("config", "user.email", "release@example.invalid")
+        # a global ignore like **/docs/ would keep the fixture's docs out of commits
+        self.git("config", "core.excludesFile", os.devnull)
         self.put("Cargo.toml", '[package]\nname = "herdr"\nversion = "1.0.0"\n[dependencies]\nserde = "1"\n')
         self.put("Cargo.lock", 'version = 4\n[[package]]\nname = "herdr"\nversion = "1.0.0"\n[[package]]\nname = "serde"\nversion = "1.0.0"\n')
         self.put("src/main.rs", "fn main() {}\n")
