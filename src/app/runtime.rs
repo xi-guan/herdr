@@ -166,7 +166,11 @@ impl App {
             // only the first read of a run may come off disk; after that the point is whether it moved
             let stored = self.state.claude_usage.is_none();
             let usage_tx = self.event_tx.clone();
-            std::thread::spawn(move || crate::usage::poll(usage_tx, stored));
+            if let Err(err) = crate::thread_spawn::spawn_named("herdr-claude-usage", move || {
+                crate::usage::poll(usage_tx, stored)
+            }) {
+                tracing::warn!(err = %err, "failed to spawn claude usage thread");
+            }
         }
         if self
             .next_claude_tokens_poll
@@ -174,11 +178,13 @@ impl App {
         {
             self.next_claude_tokens_poll = Some(now + crate::usage::TOKEN_POLL_INTERVAL);
             let tokens_tx = self.event_tx.clone();
-            std::thread::spawn(move || {
+            if let Err(err) = crate::thread_spawn::spawn_named("herdr-claude-tokens", move || {
                 let tokens = crate::usage::seven_day_tokens();
                 tracing::debug!(?tokens, "read claude token tally");
                 let _ = tokens_tx.blocking_send(AppEvent::ClaudeUsage(UsageEvent::Tokens(tokens)));
-            });
+            }) {
+                tracing::warn!(err = %err, "failed to spawn claude token tally thread");
+            }
         }
     }
 
