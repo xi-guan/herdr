@@ -8,6 +8,7 @@ pub fn run_server() -> io::Result<()> {
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     let process_context = crate::platform::prepare_server_process(handoff_import);
     init_logging();
+    install_panic_log_hook();
     if let Some(warning) = launcher_warning {
         warn!("{warning}");
     }
@@ -241,4 +242,54 @@ fn print_ready_message(api_socket: &Path, client_socket: &Path) {
 /// Initialize logging for the server process.
 fn init_logging() {
     crate::logging::init_file_logging("herdr-server.log");
+}
+
+// a detached server's stderr is /dev/null, so a panic must reach the log file instead
+fn install_panic_log_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(%info, %backtrace, "server panicked");
+        original_hook(info);
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_panic_reaches_the_server_log() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+
+        install_panic_log_hook();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = std::panic::catch_unwind(|| panic!("pane parser blew up"));
+        });
+        let _ = std::panic::take_hook();
+
+        let log = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        assert!(log.contains("server panicked"), "{log}");
+        assert!(log.contains("pane parser blew up"), "{log}");
+    }
 }
