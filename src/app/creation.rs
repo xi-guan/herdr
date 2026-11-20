@@ -215,19 +215,27 @@ impl App {
         else {
             return;
         };
+        self.open_column_beside(ws_idx, root_pane, cwd);
+    }
+
+    /// A plain shell in `cwd` to the right of `beside`, unfocused.
+    pub(crate) fn open_column_beside(
+        &mut self,
+        ws_idx: usize,
+        beside: crate::layout::PaneId,
+        cwd: PathBuf,
+    ) -> Option<crate::layout::PaneId> {
         let (rows, cols) = two_column_pane_size(&self.state, 1);
         let default_shell = self.state.default_shell.clone();
         let shell_mode = self.state.shell_mode;
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let host_terminal_appearance = self.state.host_terminal_appearance;
-        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-            return;
-        };
+        let ws = self.state.workspaces.get_mut(ws_idx)?;
         // not focused: a new space should open on the column its caller seeded, not on
         // the spare shell beside it
         let Some(Ok((_, new_pane))) = ws.split_pane_with_ratio(
-            root_pane,
+            beside,
             TWO_COLUMN_DIRECTION,
             TWO_COLUMN_RATIO,
             rows,
@@ -240,7 +248,7 @@ impl App {
             Vec::new(),
             false,
         ) else {
-            return;
+            return None;
         };
         self.terminal_runtimes
             .insert(new_pane.terminal.id.clone(), new_pane.runtime);
@@ -249,6 +257,7 @@ impl App {
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        Some(new_pane.pane_id)
     }
 
     pub(super) fn collect_panes_for_workspace(
@@ -528,7 +537,7 @@ impl App {
     }
 }
 
-fn terminal_agent_session_info(
+pub(crate) fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
     if let Some(authority) = terminal.hook_authority.as_ref() {

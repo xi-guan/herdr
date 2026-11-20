@@ -896,8 +896,21 @@ pub struct HiddenSpace {
     /// its custom name; None restores the auto name from `cwd`
     pub label: Option<String>,
     pub cwd: std::path::PathBuf,
+    /// the agents it was running, in layout order, so taking it back resumes their conversations
+    pub agents: Vec<HiddenAgent>,
     // resolved once, so every client frame that projects it skips the git root walk
     resolved_label: String,
+}
+
+/// an agent a hidden space was running: what resumes its conversation, and where
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenAgent {
+    pub agent: String,
+    pub cwd: std::path::PathBuf,
+    /// typed at a shell in `cwd`, as a restart's resume is
+    pub argv: Vec<String>,
+    /// the conversation it resumes, for a client that shows it
+    pub session: Option<crate::agent_resume::AgentSessionRef>,
 }
 
 impl HiddenSpace {
@@ -909,8 +922,14 @@ impl HiddenSpace {
             id,
             label,
             cwd,
+            agents: Vec::new(),
             resolved_label,
         }
+    }
+
+    pub fn with_agents(mut self, agents: Vec<HiddenAgent>) -> Self {
+        self.agents = agents;
+        self
     }
 
     /// the label the space carried while it was open
@@ -1056,6 +1075,16 @@ impl AppState {
                 id: hidden.id.clone(),
                 label: hidden.label.clone(),
                 cwd: hidden.cwd.clone(),
+                agents: hidden
+                    .agents
+                    .iter()
+                    .map(|agent| crate::persist::HiddenAgentSnapshot {
+                        agent: agent.agent.clone(),
+                        cwd: agent.cwd.clone(),
+                        argv: agent.argv.clone(),
+                        session: agent.session.clone(),
+                    })
+                    .collect(),
             })
             .collect()
     }
@@ -1066,7 +1095,20 @@ impl AppState {
         snapshot
             .iter()
             .map(|hidden| {
+                // the file is typed back into a shell, so it is held to what a reported resume is
+                let agents = hidden
+                    .agents
+                    .iter()
+                    .filter(|agent| crate::agent_resume::validate_resume_argv(&agent.argv).is_ok())
+                    .map(|agent| HiddenAgent {
+                        agent: agent.agent.clone(),
+                        cwd: agent.cwd.clone(),
+                        argv: agent.argv.clone(),
+                        session: agent.session.clone(),
+                    })
+                    .collect();
                 HiddenSpace::new(hidden.id.clone(), hidden.label.clone(), hidden.cwd.clone())
+                    .with_agents(agents)
             })
             .collect()
     }

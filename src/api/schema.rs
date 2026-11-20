@@ -69,6 +69,7 @@ operations::define_operations! {
     WorkspaceClose(WorkspaceCloseParams) => "workspace.close", true, true;
     WorkspaceHide(WorkspaceTarget) => "workspace.hide", true, true;
     WorkspaceUnhide(WorkspaceUnhideParams) => "workspace.unhide", true, true;
+    WorkspaceHiddenList(EmptyParams) => "workspace.hidden_list", false, false;
     WorktreeList(WorktreeListParams) => "worktree.list", false, true;
     WorktreeCreate(WorktreeCreateParams) => "worktree.create", true, true;
     WorktreeOpen(WorktreeOpenParams) => "worktree.open", true, true;

@@ -5150,6 +5150,22 @@
         {
           "properties": {
             "method": {
+              "const": "workspace.hidden_list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "worktree.list",
               "type": "string"
             },
@@ -7635,6 +7651,76 @@
           ],
           "type": "string"
         },
+        "HiddenAgentInfo": {
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HiddenAgentSessionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the conversation it resumes, as `agent_session` names it on a live pane"
+            }
+          },
+          "required": [
+            "agent",
+            "cwd"
+          ],
+          "type": "object"
+        },
+        "HiddenAgentSessionInfo": {
+          "properties": {
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentSessionRefKind"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        "HiddenWorkspaceInfo": {
+          "description": "a space put away, as `workspace.unhide` takes it back",
+          "properties": {
+            "agents": {
+              "description": "what taking it back resumes, in layout order",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/HiddenAgentInfo"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "id the workspace carried before it was hidden",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "label",
+            "cwd",
+            "agents"
+          ],
+          "type": "object"
+        },
         "InstalledPluginInfo": {
           "properties": {
             "actions": {
@@ -9415,6 +9501,25 @@
                 "workspaces": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "workspaces"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "hidden_workspace_list",
+                  "type": "string"
+                },
+                "workspaces": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/HiddenWorkspaceInfo"
                   },
                   "type": "array"
                 }

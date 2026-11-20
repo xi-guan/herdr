@@ -91,6 +91,32 @@ cli_params! {
     }
 }
 
+/// a space put away, as `workspace.unhide` takes it back
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HiddenWorkspaceInfo {
+    /// id the workspace carried before it was hidden
+    pub workspace_id: String,
+    pub label: String,
+    pub cwd: String,
+    /// what taking it back resumes, in layout order
+    pub agents: Vec<HiddenAgentInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HiddenAgentInfo {
+    pub agent: String,
+    pub cwd: String,
+    /// the conversation it resumes, as `agent_session` names it on a live pane
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<HiddenAgentSessionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HiddenAgentSessionInfo {
+    pub kind: crate::agent_resume::AgentSessionRefKind,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceInfo {
     pub workspace_id: String,

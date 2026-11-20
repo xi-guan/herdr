@@ -1548,6 +1548,7 @@ mod tests {
                 id: "wZ".into(),
                 label: Some("away".into()),
                 cwd: "/repo/away".into(),
+                agents: Vec::new(),
             }],
         };
         let (events, _event_rx) = mpsc::channel(4);

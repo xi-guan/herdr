@@ -38,6 +38,18 @@ pub struct HiddenSpaceSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub cwd: PathBuf,
+    /// a file from before hidden spaces kept their agents has none
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<HiddenAgentSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HiddenAgentSnapshot {
+    pub agent: String,
+    pub cwd: PathBuf,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::agent_resume::AgentSessionRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -975,6 +987,32 @@ mod tests {
             crate::app::state::AppState::hidden_spaces_from_snapshot(&loaded.hidden_spaces),
             state.hidden_spaces
         );
+    }
+
+    // the agents are the point of taking a space back, so they come back with it; a command no resume would type does not
+    #[test]
+    fn a_hidden_spaces_agents_survive_a_restart_and_a_bad_command_does_not() {
+        let mut state = state_with_workspaces(&["one"]);
+        let agent = |argv: &[&str]| crate::app::state::HiddenAgent {
+            agent: "claude".into(),
+            cwd: PathBuf::from("/repo/away/app"),
+            argv: argv.iter().map(|word| word.to_string()).collect(),
+            session: Some(crate::agent_resume::AgentSessionRef::id("c0ffee").unwrap()),
+        };
+        let resumed = agent(&["claude", "--resume", "c0ffee"]);
+        state.hidden_spaces = vec![crate::app::state::HiddenSpace::new(
+            "w3".into(),
+            Some("away".into()),
+            PathBuf::from("/repo/away"),
+        )
+        .with_agents(vec![resumed.clone(), agent(&["/bin/rm", "-rf", "/"])])];
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let loaded = crate::app::state::AppState::hidden_spaces_from_snapshot(
+            &parse_snapshot(&json).unwrap().hidden_spaces,
+        );
+
+        assert_eq!(loaded[0].agents, vec![resumed]);
     }
 
     #[test]

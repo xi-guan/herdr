@@ -20,6 +20,35 @@ impl App {
         )
     }
 
+    /// newest first, as herdr's sidebar lists them
+    pub(super) fn handle_workspace_hidden_list(&mut self, id: String) -> String {
+        let workspaces = self
+            .state
+            .hidden_spaces
+            .iter()
+            .map(|hidden| crate::api::schema::HiddenWorkspaceInfo {
+                workspace_id: hidden.id.clone(),
+                label: hidden.display_label().to_string(),
+                cwd: hidden.cwd.display().to_string(),
+                agents: hidden
+                    .agents
+                    .iter()
+                    .map(|agent| crate::api::schema::HiddenAgentInfo {
+                        agent: agent.agent.clone(),
+                        cwd: agent.cwd.display().to_string(),
+                        session: agent.session.as_ref().map(|session| {
+                            crate::api::schema::HiddenAgentSessionInfo {
+                                kind: session.kind,
+                                value: session.value.clone(),
+                            }
+                        }),
+                    })
+                    .collect(),
+            })
+            .collect();
+        encode_success(id, ResponseResult::HiddenWorkspaceList { workspaces })
+    }
+
     pub(super) fn handle_workspace_get(&mut self, id: String, target: WorkspaceTarget) -> String {
         let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
             return workspace_not_found(id, &target.workspace_id);
@@ -384,11 +413,10 @@ impl App {
                         .map(|ws| ws.identity_cwd.clone())
                 })?;
                 let ws = self.state.workspaces.get(idx)?;
-                Some(crate::app::state::HiddenSpace::new(
-                    ws.id.clone(),
-                    ws.custom_name.clone(),
-                    cwd,
-                ))
+                Some(
+                    crate::app::state::HiddenSpace::new(ws.id.clone(), ws.custom_name.clone(), cwd)
+                        .with_agents(self.resumable_agents(idx)),
+                )
             })
             .collect::<Vec<_>>();
         // oldest first so the newest ends up at the front of the list
@@ -428,15 +456,111 @@ impl App {
                 focus: params.focus,
                 label: hidden.label.clone(),
                 env: Default::default(),
-                // a space taken back opens like any new one: as a pair, not the column its layout lost
-                second_column: true,
+                // a space taken back opens like any new one: as a pair, not the column its layout lost;
+                // one that ran agents gets a column per agent instead
+                second_column: hidden.agents.is_empty(),
             },
         );
         // a space that failed to open is still hidden; only a real one replaces it
         if self.state.workspaces.len() > before {
             self.state.forget_hidden_space(&hidden.id);
+            self.resume_hidden_agents(self.state.workspaces.len() - 1, &hidden);
         }
         response
+    }
+
+    /// Each agent in the space that can say how to resume its conversation, in layout order.
+    fn resumable_agents(&self, ws_idx: usize) -> Vec<crate::app::state::HiddenAgent> {
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let mut agents = Vec::new();
+        for tab in &ws.tabs {
+            for pane_id in tab.layout.pane_ids() {
+                let Some(terminal) = tab
+                    .terminal_id(pane_id)
+                    .and_then(|id| self.state.terminals.get(id))
+                else {
+                    continue;
+                };
+                let Some(agent) = terminal.effective_agent_label() else {
+                    continue;
+                };
+                let session = crate::app::creation::terminal_agent_session_info(terminal);
+                let session_ref =
+                    session
+                        .as_ref()
+                        .map(|session| crate::agent_resume::AgentSessionRef {
+                            kind: session.kind,
+                            value: session.value.clone(),
+                        });
+                // the agent's own word on resuming wins, as it does on a restart
+                let argv = match (terminal.reported_resume(), &session, &session_ref) {
+                    (Some(resume), _, _) => Some(resume.argv.clone()),
+                    (None, Some(session), Some(session_ref)) => {
+                        crate::agent_resume::plan(&session.source, &session.agent, session_ref)
+                            .map(|plan| plan.argv)
+                    }
+                    _ => None,
+                };
+                let (Some(argv), Some(cwd)) = (
+                    argv,
+                    tab.cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes),
+                ) else {
+                    continue;
+                };
+                agents.push(crate::app::state::HiddenAgent {
+                    agent: agent.to_string(),
+                    cwd,
+                    argv,
+                    session: session_ref,
+                });
+            }
+        }
+        agents
+    }
+
+    /// One pane per agent in the directory it ran in, its resume command typed at the shell as a restart's is.
+    fn resume_hidden_agents(&mut self, ws_idx: usize, hidden: &crate::app::state::HiddenSpace) {
+        let Some(root) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.first())
+            .map(|tab| tab.root_pane)
+        else {
+            return;
+        };
+        let mut last = root;
+        for (index, agent) in hidden.agents.iter().enumerate() {
+            // the root pane opened in the space's directory, so only an agent that ran there takes it
+            let pane = if index == 0 && agent.cwd == hidden.cwd {
+                Some(root)
+            } else {
+                self.open_column_beside(ws_idx, last, agent.cwd.clone())
+            };
+            let Some(pane) = pane else {
+                continue;
+            };
+            last = pane;
+            let runtime = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.terminal_id(pane))
+                .and_then(|id| self.terminal_runtimes.get(id));
+            let (Some(runtime), Some(mut command)) = (
+                runtime,
+                crate::app::agent_resume::shell_command_from_argv(&agent.argv),
+            ) else {
+                continue;
+            };
+            command.push('\r');
+            if let Err(err) = runtime.try_send_bytes(bytes::Bytes::from(command)) {
+                tracing::warn!(agent = %agent.agent, err = %err, "failed to type a hidden agent's resume command");
+            }
+        }
+        self.schedule_session_save();
     }
 
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {
@@ -1084,6 +1208,123 @@ mod tests {
         );
         assert!(app.state.hidden_spaces.is_empty());
         shutdown_test_runtimes(&mut app);
+    }
+
+    // the conversation is what was put away with the space, so hiding keeps what resumes it
+    #[tokio::test]
+    async fn api_workspace_hide_remembers_how_to_resume_its_agents() {
+        use super::super::test_support::shutdown_test_runtimes;
+
+        let mut app = app_for_create_tests();
+        app.state.workspaces = vec![Workspace::test_new("away")];
+        app.state.workspaces[0].identity_cwd = std::env::temp_dir();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.cwd = std::env::temp_dir();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        let session = crate::agent_resume::AgentSessionRef::id("c0ffee");
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            session.clone(),
+            Some(1),
+        );
+
+        app.handle_workspace_hide(
+            "hide".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+
+        assert_eq!(
+            app.state.hidden_spaces[0].agents,
+            vec![crate::app::state::HiddenAgent {
+                agent: "claude".into(),
+                cwd: std::env::temp_dir(),
+                argv: vec!["claude".into(), "--resume".into(), "c0ffee".into()],
+                session: session.clone(),
+            }]
+        );
+        let response = app.handle_workspace_hidden_list("list".into());
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::HiddenWorkspaceList { workspaces } = success.result else {
+            panic!("expected the hidden list, got {response}");
+        };
+        assert_eq!(
+            workspaces,
+            vec![crate::api::schema::HiddenWorkspaceInfo {
+                workspace_id,
+                label: "away".into(),
+                cwd: std::env::temp_dir().display().to_string(),
+                agents: vec![crate::api::schema::HiddenAgentInfo {
+                    agent: "claude".into(),
+                    cwd: std::env::temp_dir().display().to_string(),
+                    session: Some(crate::api::schema::HiddenAgentSessionInfo {
+                        kind: crate::agent_resume::AgentSessionRefKind::Id,
+                        value: "c0ffee".into(),
+                    }),
+                }],
+            }]
+        );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    // each agent gets back a pane in the directory it ran in, and no spare shell beside the first
+    #[tokio::test]
+    async fn api_workspace_unhide_opens_a_pane_for_each_agent_where_it_ran() {
+        use super::super::test_support::shutdown_test_runtimes;
+
+        let home = std::env::temp_dir();
+        let elsewhere = home.join(format!("herdr-unhide-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let agent = |cwd: &std::path::Path, id: &str| crate::app::state::HiddenAgent {
+            agent: "claude".into(),
+            cwd: cwd.to_path_buf(),
+            argv: vec!["claude".into(), "--resume".into(), id.into()],
+            session: crate::agent_resume::AgentSessionRef::id(id),
+        };
+        let mut app = app_for_create_tests();
+        app.state.remember_hidden_space(
+            crate::app::state::HiddenSpace::new("w9".into(), Some("away".into()), home.clone())
+                .with_agents(vec![agent(&home, "a"), agent(&elsewhere, "b")]),
+        );
+
+        app.handle_workspace_unhide(
+            "unhide".into(),
+            crate::api::schema::WorkspaceUnhideParams {
+                workspace_id: "w9".into(),
+                focus: false,
+            },
+        );
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        let cwds: Vec<_> = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .map(|pane| {
+                app.state.terminals[&tab.panes[&pane].attached_terminal_id]
+                    .cwd
+                    .clone()
+            })
+            .collect();
+        assert_eq!(cwds, vec![home, elsewhere.clone()]);
+        assert!(app.state.hidden_spaces.is_empty());
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir(&elsewhere);
     }
 
     #[test]

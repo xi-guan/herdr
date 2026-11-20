@@ -1129,6 +1129,7 @@ impl App {
                 return self.handle_workspace_close(request.id, target);
             }
             Method::WorkspaceHide(target) => return self.handle_workspace_hide(request.id, target),
+            Method::WorkspaceHiddenList(_) => return self.handle_workspace_hidden_list(request.id),
             Method::WorkspaceUnhide(params) => {
                 return self.handle_workspace_unhide(request.id, params)
             }
