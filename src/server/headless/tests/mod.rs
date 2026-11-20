@@ -4824,6 +4824,176 @@ fn focused_client_shell_switching_to_attached_tab_takes_pane() {
     });
 }
 
+// the pane sits on a background tab, so only the attach client can be watching it
+fn with_terminal_attach_on_background_tab(
+    test: impl FnOnce(&mut HeadlessServer, crate::layout::PaneId, crate::terminal::TerminalId),
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("test");
+    let background_tab = workspace.test_add_tab(Some("background"));
+    let pane_id = workspace.tabs[background_tab].root_pane;
+    let terminal_id = workspace.tabs[background_tab]
+        .terminal_id(pane_id)
+        .expect("terminal id")
+        .clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+    server.app.terminal_runtimes.insert(
+        terminal_id.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+    );
+    connect_pending_terminal_client(&mut server, 2);
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 2,
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        })
+    );
+
+    test(&mut server, pane_id, terminal_id);
+
+    drop(server);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+fn finish_agent(
+    server: &mut HeadlessServer,
+    pane_id: crate::layout::PaneId,
+    terminal_id: &crate::terminal::TerminalId,
+) {
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(terminal_id)
+        .expect("terminal state")
+        .state = crate::detect::AgentState::Working;
+    server.app.state.handle_app_event(AppEvent::StateChanged {
+        pane_id,
+        agent: Some(crate::detect::Agent::Pi),
+        state: crate::detect::AgentState::Idle,
+        visible_blocker: false,
+        visible_working: false,
+        process_exited: false,
+        observed_at: Instant::now(),
+    });
+}
+
+fn pane_seen(server: &HeadlessServer, pane_id: crate::layout::PaneId) -> bool {
+    server.app.state.workspaces[0]
+        .pane_state(pane_id)
+        .expect("pane state")
+        .seen
+}
+
+fn agent_status_events(server: &HeadlessServer) -> Vec<(String, api::schema::AgentStatus)> {
+    server
+        .app
+        .event_hub
+        .events_after(0)
+        .into_iter()
+        .filter_map(|(_, event)| match event.data {
+            api::schema::EventData::PaneAgentStatusChanged {
+                pane_id,
+                agent_status,
+                ..
+            } => Some((pane_id, agent_status)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn focused_terminal_attach_reaches_its_finished_pane() {
+    with_terminal_attach_on_background_tab(|server, pane_id, terminal_id| {
+        server.app.state.toast_config.delay_seconds = 5;
+        finish_agent(server, pane_id, &terminal_id);
+        assert!(!pane_seen(server, pane_id));
+        assert!(server
+            .app
+            .state
+            .pending_agent_notifications
+            .contains_key(&pane_id));
+        let before = agent_status_events(server).len();
+
+        assert!(send_focus(server, 2, true));
+        assert!(pane_seen(server, pane_id));
+        assert!(server.app.state.acknowledged_at.contains_key(&terminal_id));
+        assert!(server.app.state.pending_agent_notifications.is_empty());
+        let public_pane_id = server
+            .app
+            .public_pane_id(0, pane_id)
+            .expect("public pane id");
+        assert_eq!(
+            agent_status_events(server)[before..],
+            [(public_pane_id, api::schema::AgentStatus::Idle)]
+        );
+
+        // coming back to a pane already reached has nothing new to announce
+        assert!(!send_focus(server, 2, false));
+        assert!(send_focus(server, 2, true));
+        assert_eq!(agent_status_events(server).len(), before + 1);
+    });
+}
+
+#[test]
+fn unfocused_terminal_attach_leaves_finished_pane_unseen() {
+    with_terminal_attach_on_background_tab(|server, pane_id, terminal_id| {
+        server.app.state.toast_config.delay_seconds = 5;
+        finish_agent(server, pane_id, &terminal_id);
+        assert!(!send_focus(server, 2, false));
+        assert!(!pane_seen(server, pane_id));
+
+        // a panel sent to the background stops watching before the agent finishes
+        assert!(send_focus(server, 2, true));
+        assert!(server.app.state.pending_agent_notifications.is_empty());
+        assert!(!send_focus(server, 2, false));
+        finish_agent(server, pane_id, &terminal_id);
+        assert!(!pane_seen(server, pane_id));
+        assert!(server
+            .app
+            .state
+            .pending_agent_notifications
+            .contains_key(&pane_id));
+    });
+}
+
+#[test]
+fn completion_watched_through_focused_terminal_attach_stays_seen() {
+    with_terminal_attach_on_background_tab(|server, pane_id, terminal_id| {
+        server.app.state.toast_config.delay_seconds = 5;
+        assert!(send_focus(server, 2, true));
+        finish_agent(server, pane_id, &terminal_id);
+
+        assert!(pane_seen(server, pane_id));
+        assert!(server.app.state.acknowledged_at.contains_key(&terminal_id));
+        assert!(server.app.state.toast.is_none());
+        assert!(server.app.state.pending_agent_notifications.is_empty());
+    });
+}
+
+#[test]
+fn completion_after_focused_terminal_attach_disconnects_is_unseen() {
+    with_terminal_attach_on_background_tab(|server, pane_id, terminal_id| {
+        assert!(send_focus(server, 2, true));
+        server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 2 });
+        assert!(server.app.state.attach_watched_terminals.is_empty());
+
+        finish_agent(server, pane_id, &terminal_id);
+        assert!(!pane_seen(server, pane_id));
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn backpressured_observer_skips_runtime_access_and_recovers_without_new_output() {

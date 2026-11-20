@@ -494,6 +494,42 @@ impl AppState {
         self.hold_acknowledged(acknowledged)
     }
 
+    pub(crate) fn pane_watched_by_attach(&self, pane_id: PaneId) -> bool {
+        !self.attach_watched_terminals.is_empty()
+            && self
+                .workspaces
+                .iter()
+                .find_map(|ws| ws.terminal_id(pane_id))
+                .is_some_and(|terminal_id| self.attach_watched_terminals.contains(terminal_id))
+    }
+
+    /// an attach client coming into view reaches its pane like a tab switch; yields it only if it was unseen
+    pub(crate) fn mark_attached_terminal_seen(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<(usize, PaneId)> {
+        let (ws_idx, pane_id, pane) =
+            self.workspaces
+                .iter_mut()
+                .enumerate()
+                .find_map(|(ws_idx, ws)| {
+                    ws.tabs.iter_mut().find_map(|tab| {
+                        tab.panes
+                            .iter_mut()
+                            .find(|(_, pane)| pane.attached_terminal_id == *terminal_id)
+                            .map(|(pane_id, pane)| (ws_idx, *pane_id, pane))
+                    })
+                })?;
+        let reached = !pane.seen;
+        pane.seen = true;
+        self.pending_agent_notifications.remove(&pane_id);
+        if !reached {
+            return None;
+        }
+        self.hold_acknowledged(vec![terminal_id.clone()]);
+        Some((ws_idx, pane_id))
+    }
+
     /// keeps the colour these terminals wore when reached, or the mark vanishes with the arrival.
     pub(crate) fn hold_acknowledged(
         &mut self,
@@ -1903,7 +1939,8 @@ impl AppState {
     ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
-            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus)
+                || self.pane_watched_by_attach(pane_id);
         let pane = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
@@ -1946,7 +1983,8 @@ impl AppState {
 
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
-            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus)
+                || self.pane_watched_by_attach(pane_id);
 
         let client_notification_kind = notification_toast_for_effective_state_change(
             suppress_active_tab_notifications,
@@ -2032,8 +2070,10 @@ impl AppState {
         }
 
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let watched_by_attach = self.pane_watched_by_attach(pane_id);
         let suppress_active_tab_notifications =
-            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus)
+                || watched_by_attach;
         let sound = sound_for_toast_kind(kind, suppress_active_tab_notifications)
             .filter(|_| self.sound.allows(known_agent));
         let build_toast = || {
@@ -2056,7 +2096,7 @@ impl AppState {
                 }),
             }
         };
-        let toast = (!is_active_tab).then(build_toast);
+        let toast = (!is_active_tab && !watched_by_attach).then(build_toast);
         let client_notification = (!suppress_active_tab_notifications).then(build_toast);
 
         if toast.is_none() && client_notification.is_none() && sound.is_none() {

@@ -899,11 +899,31 @@ impl HeadlessServer {
         self.clients.get(&client_id)?.outer_terminal_focus
     }
 
-    fn active_tab_suppresses_notifications(&self, is_active_tab: bool) -> bool {
+    fn active_tab_suppresses_notifications(
+        &self,
+        is_active_tab: bool,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
         crate::app::actions::active_tab_suppresses_notifications(
             is_active_tab,
             self.foreground_client_outer_focus(),
-        )
+        ) || self.app.state.pane_watched_by_attach(pane_id)
+    }
+
+    // the panel reports focus only while it shows the pane in a focused window, so focus means watched
+    fn sync_attach_watched_terminals(&mut self) {
+        let watched = self
+            .clients
+            .values()
+            .filter(|client| client.outer_terminal_focus == Some(true))
+            .filter_map(|client| match &client.mode {
+                ClientConnectionMode::TerminalAttach { terminal_id } => {
+                    self.terminal_id_by_string(terminal_id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.app.state.attach_watched_terminals = watched;
     }
 
     fn promote_client_to_foreground(&mut self, client_id: u64) -> bool {
@@ -990,6 +1010,7 @@ impl HeadlessServer {
                         .direct_attach_resize_locks
                         .remove(&terminal_id);
                 }
+                self.sync_attach_watched_terminals();
             }
         }
         if should_release_focus {
@@ -2359,9 +2380,24 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get(&client_id) else {
                     return false;
                 };
-                if matches!(client.mode, ClientConnectionMode::TerminalAttach { .. }) {
+                if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
+                    let terminal_id = self.terminal_id_by_string(terminal_id);
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.outer_terminal_focus = Some(focused);
+                    }
+                    self.sync_attach_watched_terminals();
+                    if !focused {
+                        return false;
+                    }
                     // the window in front gets the pane's full size; losing focus keeps it
-                    return focused && self.lock_terminal_attach_size(client_id);
+                    let locked = self.lock_terminal_attach_size(client_id);
+                    let reached = terminal_id.and_then(|terminal_id| {
+                        self.app.state.mark_attached_terminal_seen(&terminal_id)
+                    });
+                    if let Some((ws_idx, pane_id)) = reached {
+                        self.app.emit_pane_reached(ws_idx, pane_id);
+                    }
+                    return locked || reached.is_some();
                 }
                 if !client.is_active_shell_client() || client.outer_terminal_focus == Some(focused)
                 {
@@ -3266,7 +3302,7 @@ impl HeadlessServer {
 
             let is_active_tab = self.app.state.pane_is_in_active_tab(*ws_idx, *pane_id);
             let suppress_active_tab_notifications =
-                self.active_tab_suppresses_notifications(is_active_tab);
+                self.active_tab_suppresses_notifications(is_active_tab, *pane_id);
 
             let agent = terminal_after.effective_known_agent();
             let agent_label = terminal_after.effective_agent_label().map(str::to_string);

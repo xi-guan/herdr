@@ -932,6 +932,8 @@ pub struct AppState {
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
+    /// Terminal ids a focused direct attach client is showing; they count as watched, like the active tab.
+    pub attach_watched_terminals: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1234,6 +1236,7 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            attach_watched_terminals: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

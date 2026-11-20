@@ -746,6 +746,43 @@ impl App {
         }
     }
 
+    /// reaching a finished pane without a focus change tells subscribers nothing else, so say it settled
+    pub(crate) fn emit_pane_reached(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return;
+        };
+        let Some(pane) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_state(pane_id))
+        else {
+            return;
+        };
+        let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id) else {
+            return;
+        };
+        let agent_status = pane_agent_status(terminal.state, pane.seen);
+        if pane_agent_status(terminal.state, false) == agent_status {
+            return;
+        }
+        let presentation = terminal.effective_presentation();
+        let agent = terminal.effective_agent_label().map(str::to_string);
+        let workspace_id = self.public_workspace_id(ws_idx);
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+            data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                pane_id: public_pane_id,
+                workspace_id,
+                agent_status,
+                agent,
+                title: presentation.title,
+                display_agent: presentation.display_agent,
+                state_labels: presentation.state_labels,
+            },
+        });
+    }
+
     pub(crate) fn sync_toast_deadline(
         &mut self,
         previous_toast: Option<crate::app::state::ToastNotification>,
